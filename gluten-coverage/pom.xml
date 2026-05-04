@@ -24,26 +24,25 @@
     <relativePath>../pom.xml</relativePath>
   </parent>
 
-  <artifactId>gluten-delta</artifactId>
+  <artifactId>gluten-coverage</artifactId>
   <packaging>jar</packaging>
-  <name>Gluten DeltaLake</name>
+  <name>Gluten Coverage</name>
+  <description>Backend-agnostic coverage measurement for Gluten integrations.
+    Walks an executed Spark plan and classifies each node as Native, Fallback,
+    Adapter, or Vanilla against a YAML-declared feature matrix. Each integration
+    (Delta, Iceberg, Hudi, Paimon) registers its matrix via java.util.ServiceLoader.</description>
 
   <dependencies>
     <dependency>
       <groupId>org.apache.gluten</groupId>
-      <artifactId>gluten-substrait</artifactId>
+      <artifactId>gluten-core</artifactId>
       <version>${project.version}</version>
       <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.gluten</groupId>
-      <artifactId>gluten-coverage</artifactId>
+      <artifactId>gluten-substrait</artifactId>
       <version>${project.version}</version>
-      <scope>provided</scope>
-    </dependency>
-    <dependency>
-      <groupId>io.delta</groupId>
-      <artifactId>${delta.package.name}_${scala.binary.version}</artifactId>
       <scope>provided</scope>
     </dependency>
     <dependency>
@@ -62,10 +61,30 @@
       <scope>provided</scope>
     </dependency>
     <dependency>
-      <groupId>org.apache.spark</groupId>
-      <artifactId>spark-network-shuffle_${scala.binary.version}</artifactId>
-      <version>${spark.version}</version>
-      <scope>provided</scope>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-annotations</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.module</groupId>
+      <artifactId>jackson-module-scala_${scala.binary.version}</artifactId>
+    </dependency>
+    <!--
+      jackson-dataformat-yaml is not shipped by Spark or Gluten transitively. Pinned to
+      Spark 3.5.x's Jackson version (2.15.2) so it composes cleanly with Spark's classpath;
+      revisit when Gluten bumps to a Jackson version other than 2.15.x.
+    -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.dataformat</groupId>
+      <artifactId>jackson-dataformat-yaml</artifactId>
+      <version>2.15.2</version>
     </dependency>
 
     <!-- For test -->
@@ -92,28 +111,10 @@
       <type>test-jar</type>
     </dependency>
     <dependency>
-      <groupId>org.apache.spark</groupId>
-      <artifactId>spark-hive_${scala.binary.version}</artifactId>
-      <version>${spark.version}</version>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.apache.hadoop</groupId>
-      <artifactId>hadoop-common</artifactId>
-      <version>${hadoop.version}</version>
-      <scope>provided</scope>
-    </dependency>
-    <dependency>
       <groupId>org.apache.hadoop</groupId>
       <artifactId>hadoop-client</artifactId>
       <version>${hadoop.version}</version>
       <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>com.google.protobuf</groupId>
-      <artifactId>protobuf-java</artifactId>
-      <version>${protobuf.version}</version>
-      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>org.scalatest</groupId>

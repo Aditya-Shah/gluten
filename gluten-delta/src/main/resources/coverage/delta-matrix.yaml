@@ -1,0 +1,2929 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Delta-on-Gluten coverage matrix.
+#
+# Authoring notes:
+#   - Each entry has a unique stable `id`. Renaming is a baseline-breaking change; retire via
+#     `archived: true` and add a new entry instead.
+#   - `expected` is the verdict baseline at the program's M1 starting point (Gluten 1.6 +
+#     Delta 3.3.2 + Spark 3.5.5). It is updated as PRs land and the baseline is republished.
+#   - `upstream_claim` is copied from apache/gluten/docs/get-started/VeloxDelta.md and used
+#     for the discrepancy report. Use `not-tested` when the upstream doc lists "Not tested".
+#   - SQL strings are passed verbatim to spark.sql(); multi-statement blocks split on `;`.
+#   - Table names are prefixed `cov_` and dropped in teardown.
+
+schema_version: 1
+matrix_id: delta
+
+entries:
+
+# ============================================================================
+# CoW reads
+# ============================================================================
+
+  - id: cow-read-select-basic-int
+    feature: cow-read
+    operation: select
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_int (id INT, payload STRING) USING delta;
+      INSERT INTO cov_r_int VALUES (1, 'a'), (2, 'b'), (3, 'c');
+    query_sql: |
+      SELECT id, payload FROM cov_r_int WHERE id > 1;
+    teardown_sql: |
+      DROP TABLE cov_r_int;
+
+  - id: cow-read-select-basic-string
+    feature: cow-read
+    operation: select
+    dtype: string
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_str (s STRING, n INT) USING delta;
+      INSERT INTO cov_r_str VALUES ('alpha', 1), ('beta', 2), ('gamma', 3);
+    query_sql: |
+      SELECT s FROM cov_r_str WHERE s LIKE 'a%';
+    teardown_sql: |
+      DROP TABLE cov_r_str;
+
+  - id: cow-read-filter-pushdown
+    feature: cow-read
+    operation: filter-pushdown
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_fp (id INT, v DOUBLE) USING delta;
+      INSERT INTO cov_r_fp VALUES (1, 1.5), (2, 2.5), (3, 3.5), (4, 4.5);
+    query_sql: |
+      SELECT id FROM cov_r_fp WHERE id BETWEEN 2 AND 3 AND v > 2.0;
+    teardown_sql: |
+      DROP TABLE cov_r_fp;
+
+  - id: cow-read-projection-pushdown
+    feature: cow-read
+    operation: projection-pushdown
+    dtype: mixed
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_pp (id INT, a STRING, b STRING, c STRING) USING delta;
+      INSERT INTO cov_r_pp VALUES (1, 'x', 'y', 'z'), (2, 'p', 'q', 'r');
+    query_sql: |
+      SELECT a FROM cov_r_pp;
+    teardown_sql: |
+      DROP TABLE cov_r_pp;
+
+  - id: cow-read-partition-pruning
+    feature: cow-read
+    operation: partition-pruning
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_pa (id INT, p INT) USING delta PARTITIONED BY (p);
+      INSERT INTO cov_r_pa VALUES (1, 10), (2, 20), (3, 30);
+    query_sql: |
+      SELECT id FROM cov_r_pa WHERE p = 20;
+    teardown_sql: |
+      DROP TABLE cov_r_pa;
+
+  - id: cow-read-data-skipping
+    feature: cow-read
+    operation: data-skipping
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_ds (id INT, v INT) USING delta;
+      INSERT INTO cov_r_ds VALUES (1, 100), (2, 200), (3, 300), (4, 400);
+    query_sql: |
+      SELECT id FROM cov_r_ds WHERE v > 250;
+    teardown_sql: |
+      DROP TABLE cov_r_ds;
+
+  - id: cow-read-time-travel-version
+    feature: cow-read
+    operation: time-travel-version
+    dtype: n/a
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_tv (id INT) USING delta;
+      INSERT INTO cov_r_tv VALUES (1);
+      INSERT INTO cov_r_tv VALUES (2);
+    query_sql: |
+      SELECT id FROM cov_r_tv VERSION AS OF 1;
+    teardown_sql: |
+      DROP TABLE cov_r_tv;
+
+  - id: cow-read-time-travel-timestamp
+    feature: cow-read
+    operation: time-travel-timestamp
+    dtype: n/a
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_tt (id INT) USING delta;
+      INSERT INTO cov_r_tt VALUES (1);
+    query_sql: |
+      SELECT id FROM cov_r_tt;
+    teardown_sql: |
+      DROP TABLE cov_r_tt;
+    notes: "Timestamp-based time travel verifies the syntax compiles; precise timestamp asserts
+            require Spark Thrift session, deferred."
+
+  - id: cow-read-column-mapping-id
+    feature: table-feature-column-mapping
+    operation: select
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_cmid (id INT, v STRING) USING delta
+        TBLPROPERTIES ('delta.columnMapping.mode' = 'id', 'delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5');
+      INSERT INTO cov_r_cmid VALUES (1, 'a'), (2, 'b');
+    query_sql: |
+      SELECT v FROM cov_r_cmid WHERE id = 1;
+    teardown_sql: |
+      DROP TABLE cov_r_cmid;
+
+  - id: cow-read-column-mapping-name
+    feature: table-feature-column-mapping
+    operation: select-name-mode
+    dtype: int
+    expected: fallback
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_cmname (id INT, v STRING) USING delta
+        TBLPROPERTIES ('delta.columnMapping.mode' = 'name', 'delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5');
+      INSERT INTO cov_r_cmname VALUES (1, 'a'), (2, 'b');
+    query_sql: |
+      SELECT v FROM cov_r_cmname WHERE id = 1;
+    teardown_sql: |
+      DROP TABLE cov_r_cmname;
+    notes: "Defensive fallback per V6 §3.1; native acceleration tracked at #10511."
+
+  - id: cow-read-metadata-file-name
+    feature: cow-read
+    operation: metadata-input-file-name
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_r_mfn (id INT) USING delta;
+      INSERT INTO cov_r_mfn VALUES (1), (2);
+    query_sql: |
+      SELECT id, input_file_name() FROM cov_r_mfn;
+    teardown_sql: |
+      DROP TABLE cov_r_mfn;
+    notes: "Tracks #10840."
+
+  - id: cow-read-metadata-row-index
+    feature: cow-read
+    operation: metadata-row-index
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_r_mri (id INT) USING delta;
+      INSERT INTO cov_r_mri VALUES (1), (2), (3);
+    query_sql: |
+      SELECT id, _metadata.row_index FROM cov_r_mri;
+    teardown_sql: |
+      DROP TABLE cov_r_mri;
+
+  - id: cow-read-row-tracking
+    feature: table-feature-row-tracking
+    operation: select-row-id
+    dtype: n/a
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.2"
+    setup_sql: |
+      CREATE TABLE cov_r_rt (id INT) USING delta
+        TBLPROPERTIES ('delta.enableRowTracking' = 'true');
+      INSERT INTO cov_r_rt VALUES (1), (2), (3);
+    query_sql: |
+      SELECT id, _metadata.row_id FROM cov_r_rt;
+    teardown_sql: |
+      DROP TABLE cov_r_rt;
+
+  - id: cow-read-generated-columns
+    feature: table-feature-generated-cols
+    operation: select-generated
+    dtype: int
+    expected: partial
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_r_gen (id INT, day DATE GENERATED ALWAYS AS (CAST('2024-01-01' AS DATE))) USING delta;
+      INSERT INTO cov_r_gen (id) VALUES (1), (2);
+    query_sql: |
+      SELECT id, day FROM cov_r_gen WHERE day = '2024-01-01';
+    teardown_sql: |
+      DROP TABLE cov_r_gen;
+
+  - id: cow-read-tsntz
+    feature: table-feature-tsntz
+    operation: select-tsntz
+    dtype: timestamp_ntz
+    expected: fallback
+    upstream_claim: no
+    delta_min_version: "3.2"
+    setup_sql: |
+      CREATE TABLE cov_r_tsntz (id INT, ts TIMESTAMP_NTZ) USING delta;
+      INSERT INTO cov_r_tsntz VALUES (1, TIMESTAMP_NTZ '2024-01-01 00:00:00');
+    query_sql: |
+      SELECT id, ts FROM cov_r_tsntz;
+    teardown_sql: |
+      DROP TABLE cov_r_tsntz;
+    notes: "Defensive fallback landed via validator #11609."
+
+  - id: cow-read-type-widening
+    feature: table-feature-type-widening
+    operation: select-widened
+    dtype: int-to-bigint
+    expected: partial
+    upstream_claim: partial
+    delta_min_version: "3.2"
+    setup_sql: |
+      CREATE TABLE cov_r_tw (id INT) USING delta
+        TBLPROPERTIES ('delta.enableTypeWidening' = 'true');
+      INSERT INTO cov_r_tw VALUES (1), (2);
+      ALTER TABLE cov_r_tw ALTER COLUMN id TYPE BIGINT;
+      INSERT INTO cov_r_tw VALUES (10000000000);
+    query_sql: |
+      SELECT id FROM cov_r_tw WHERE id < 5;
+    teardown_sql: |
+      DROP TABLE cov_r_tw;
+
+  - id: cow-read-deletion-vector
+    feature: mor-read
+    operation: select-with-dv
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    setup_sql: |
+      CREATE TABLE cov_r_dv (id INT) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_r_dv VALUES (1), (2), (3), (4);
+      DELETE FROM cov_r_dv WHERE id = 2;
+    query_sql: |
+      SELECT id FROM cov_r_dv;
+    teardown_sql: |
+      DROP TABLE cov_r_dv;
+
+  - id: cow-read-cdf-batch
+    feature: cdc
+    operation: table-changes-batch
+    dtype: n/a
+    expected: fallback
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_cdf (id INT) USING delta
+        TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true');
+      INSERT INTO cov_r_cdf VALUES (1), (2);
+      UPDATE cov_r_cdf SET id = id + 10 WHERE id = 1;
+    query_sql: |
+      SELECT * FROM table_changes('cov_r_cdf', 0, 2);
+    teardown_sql: |
+      DROP TABLE cov_r_cdf;
+
+  - id: cow-read-describe-history
+    feature: cow-read
+    operation: describe-history
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_r_dh (id INT) USING delta;
+      INSERT INTO cov_r_dh VALUES (1);
+    query_sql: |
+      DESCRIBE HISTORY cov_r_dh;
+    teardown_sql: |
+      DROP TABLE cov_r_dh;
+    notes: "Inherited (JVM-only); reported as fallback for visibility."
+
+  - id: cow-read-describe-detail
+    feature: cow-read
+    operation: describe-detail
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_r_dd (id INT) USING delta;
+      INSERT INTO cov_r_dd VALUES (1);
+    query_sql: |
+      DESCRIBE DETAIL cov_r_dd;
+    teardown_sql: |
+      DROP TABLE cov_r_dd;
+
+  - id: cow-read-show-tblproperties
+    feature: cow-read
+    operation: show-tblproperties
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_r_stp (id INT) USING delta;
+    query_sql: |
+      SHOW TBLPROPERTIES cov_r_stp;
+    teardown_sql: |
+      DROP TABLE cov_r_stp;
+
+  - id: cow-read-wide-schema
+    feature: cow-read
+    operation: select-wide-schema
+    dtype: mixed
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_wide (
+        c1 INT, c2 INT, c3 INT, c4 INT, c5 INT,
+        c6 INT, c7 INT, c8 INT, c9 INT, c10 INT,
+        c11 STRING, c12 STRING, c13 STRING, c14 STRING, c15 STRING
+      ) USING delta;
+      INSERT INTO cov_r_wide VALUES (1,2,3,4,5,6,7,8,9,10,'a','b','c','d','e');
+    query_sql: |
+      SELECT c1, c5, c10, c15 FROM cov_r_wide WHERE c1 = 1;
+    teardown_sql: |
+      DROP TABLE cov_r_wide;
+
+  - id: cow-read-nested-types
+    feature: cow-read
+    operation: select-nested
+    dtype: struct-array
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_nest (id INT, s STRUCT<a:INT,b:STRING>, arr ARRAY<INT>) USING delta;
+      INSERT INTO cov_r_nest VALUES (1, named_struct('a', 10, 'b', 'x'), array(1,2,3));
+    query_sql: |
+      SELECT id, s.a, arr[0] FROM cov_r_nest;
+    teardown_sql: |
+      DROP TABLE cov_r_nest;
+
+# ============================================================================
+# CoW writes (most require enableNativeWrite=true)
+# ============================================================================
+
+  - id: cow-write-insert-into
+    feature: cow-write
+    operation: insert-into
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_ii (id INT, v STRING) USING delta;
+    query_sql: |
+      INSERT INTO cov_w_ii VALUES (1, 'a'), (2, 'b'), (3, 'c');
+    teardown_sql: |
+      DROP TABLE cov_w_ii;
+
+  - id: cow-write-insert-overwrite-static
+    feature: cow-write
+    operation: insert-overwrite-static
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_ios (id INT) USING delta;
+      INSERT INTO cov_w_ios VALUES (1), (2);
+    query_sql: |
+      INSERT OVERWRITE cov_w_ios VALUES (10), (20);
+    teardown_sql: |
+      DROP TABLE cov_w_ios;
+
+  - id: cow-write-insert-overwrite-dynamic
+    feature: cow-write
+    operation: insert-overwrite-dynamic
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+      "spark.sql.sources.partitionOverwriteMode": "dynamic"
+    setup_sql: |
+      CREATE TABLE cov_w_iod (id INT, p INT) USING delta PARTITIONED BY (p);
+      INSERT INTO cov_w_iod VALUES (1, 10), (2, 20);
+    query_sql: |
+      INSERT OVERWRITE cov_w_iod VALUES (3, 10);
+    teardown_sql: |
+      DROP TABLE cov_w_iod;
+
+  - id: cow-write-ctas
+    feature: cow-write
+    operation: ctas
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_ctas_src (id INT, v STRING) USING delta;
+      INSERT INTO cov_w_ctas_src VALUES (1, 'a'), (2, 'b');
+    query_sql: |
+      CREATE TABLE cov_w_ctas_tgt USING delta AS SELECT * FROM cov_w_ctas_src;
+    teardown_sql: |
+      DROP TABLE cov_w_ctas_tgt;
+      DROP TABLE cov_w_ctas_src;
+
+  - id: cow-write-rtas
+    feature: cow-write
+    operation: rtas
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_rtas (id INT) USING delta;
+      INSERT INTO cov_w_rtas VALUES (1);
+    query_sql: |
+      REPLACE TABLE cov_w_rtas USING delta AS SELECT 100 AS id;
+    teardown_sql: |
+      DROP TABLE cov_w_rtas;
+
+  - id: cow-write-partitioned
+    feature: cow-write
+    operation: insert-partitioned
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_part (id INT, p STRING) USING delta PARTITIONED BY (p);
+    query_sql: |
+      INSERT INTO cov_w_part VALUES (1, 'a'), (2, 'b'), (3, 'a');
+    teardown_sql: |
+      DROP TABLE cov_w_part;
+
+  - id: cow-write-multi-col-partitioned
+    feature: cow-write
+    operation: insert-multi-partitioned
+    dtype: mixed
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_mp (id INT, p1 STRING, p2 INT) USING delta PARTITIONED BY (p1, p2);
+    query_sql: |
+      INSERT INTO cov_w_mp VALUES (1, 'a', 10), (2, 'b', 20);
+    teardown_sql: |
+      DROP TABLE cov_w_mp;
+
+  - id: cow-write-schema-evolution
+    feature: cow-write
+    operation: insert-schema-evo
+    dtype: int
+    expected: partial
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+      "spark.databricks.delta.schema.autoMerge.enabled": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_se (id INT) USING delta;
+    query_sql: |
+      INSERT INTO cov_w_se SELECT 1 AS id, 'extra' AS new_col;
+    teardown_sql: |
+      DROP TABLE cov_w_se;
+
+  - id: cow-write-identity-column
+    feature: table-feature-identity
+    operation: insert-with-identity
+    dtype: bigint
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_id (id BIGINT GENERATED ALWAYS AS IDENTITY, v STRING) USING delta;
+    query_sql: |
+      INSERT INTO cov_w_id (v) VALUES ('a'), ('b'), ('c');
+    teardown_sql: |
+      DROP TABLE cov_w_id;
+
+  - id: cow-write-cdf-partition
+    feature: cdc
+    operation: write-cdf-emission
+    dtype: int
+    expected: partial
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_cdf (id INT) USING delta
+        TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true');
+    query_sql: |
+      INSERT INTO cov_w_cdf VALUES (1), (2);
+    teardown_sql: |
+      DROP TABLE cov_w_cdf;
+
+  - id: cow-write-compression-zstd
+    feature: cow-write
+    operation: insert-compression-zstd
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+      "spark.sql.parquet.compression.codec": "zstd"
+    setup_sql: |
+      CREATE TABLE cov_w_zstd (id INT) USING delta;
+    query_sql: |
+      INSERT INTO cov_w_zstd VALUES (1), (2), (3);
+    teardown_sql: |
+      DROP TABLE cov_w_zstd;
+
+  - id: cow-write-compression-snappy
+    feature: cow-write
+    operation: insert-compression-snappy
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+      "spark.sql.parquet.compression.codec": "snappy"
+    setup_sql: |
+      CREATE TABLE cov_w_snappy (id INT) USING delta;
+    query_sql: |
+      INSERT INTO cov_w_snappy VALUES (1), (2), (3);
+    teardown_sql: |
+      DROP TABLE cov_w_snappy;
+
+  - id: cow-write-update-basic
+    feature: cow-write
+    operation: update
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_upd (id INT, v STRING) USING delta;
+      INSERT INTO cov_w_upd VALUES (1, 'a'), (2, 'b'), (3, 'c');
+    query_sql: |
+      UPDATE cov_w_upd SET v = 'updated' WHERE id = 2;
+    teardown_sql: |
+      DROP TABLE cov_w_upd;
+
+  - id: cow-write-update-partition-changing
+    feature: cow-write
+    operation: update-partition-changing
+    dtype: int
+    expected: partial
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_upm (id INT, p INT) USING delta PARTITIONED BY (p);
+      INSERT INTO cov_w_upm VALUES (1, 10), (2, 20);
+    query_sql: |
+      UPDATE cov_w_upm SET p = 30 WHERE id = 1;
+    teardown_sql: |
+      DROP TABLE cov_w_upm;
+
+  - id: cow-write-delete-basic
+    feature: cow-write
+    operation: delete
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_del (id INT, v STRING) USING delta;
+      INSERT INTO cov_w_del VALUES (1, 'a'), (2, 'b'), (3, 'c');
+    query_sql: |
+      DELETE FROM cov_w_del WHERE id = 2;
+    teardown_sql: |
+      DROP TABLE cov_w_del;
+
+  - id: cow-write-delete-partition-only
+    feature: cow-write
+    operation: delete-partition-only
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_dp (id INT, p INT) USING delta PARTITIONED BY (p);
+      INSERT INTO cov_w_dp VALUES (1, 10), (2, 20), (3, 30);
+    query_sql: |
+      DELETE FROM cov_w_dp WHERE p = 20;
+    teardown_sql: |
+      DROP TABLE cov_w_dp;
+
+  - id: cow-write-merge-classic-int
+    feature: cow-write
+    operation: merge
+    dtype: int
+    expected: fallback
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_mt (id INT, v STRING) USING delta TBLPROPERTIES ('delta.enableDeletionVectors' = 'false');
+      INSERT INTO cov_w_mt VALUES (1, 'a'), (2, 'b');
+      CREATE TABLE cov_w_ms (id INT, v STRING) USING delta;
+      INSERT INTO cov_w_ms VALUES (2, 'B'), (3, 'C');
+    query_sql: |
+      MERGE INTO cov_w_mt t USING cov_w_ms s ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET v = s.v
+      WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v);
+    teardown_sql: |
+      DROP TABLE cov_w_mt;
+      DROP TABLE cov_w_ms;
+    notes: "MERGE INTO falls back today; flips to native at M2 close per HLD §10."
+
+  - id: cow-write-merge-update-only
+    feature: cow-write
+    operation: merge-update-only
+    dtype: int
+    expected: fallback
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_muo_t (id INT, v STRING) USING delta TBLPROPERTIES ('delta.enableDeletionVectors' = 'false');
+      INSERT INTO cov_w_muo_t VALUES (1, 'a'), (2, 'b');
+      CREATE TABLE cov_w_muo_s (id INT, v STRING) USING delta;
+      INSERT INTO cov_w_muo_s VALUES (1, 'A'), (2, 'B');
+    query_sql: |
+      MERGE INTO cov_w_muo_t t USING cov_w_muo_s s ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET v = s.v;
+    teardown_sql: |
+      DROP TABLE cov_w_muo_t;
+      DROP TABLE cov_w_muo_s;
+
+  - id: cow-write-merge-delete-only
+    feature: cow-write
+    operation: merge-delete-only
+    dtype: int
+    expected: fallback
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_mdo_t (id INT, v STRING) USING delta TBLPROPERTIES ('delta.enableDeletionVectors' = 'false');
+      INSERT INTO cov_w_mdo_t VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      CREATE TABLE cov_w_mdo_s (id INT) USING delta;
+      INSERT INTO cov_w_mdo_s VALUES (2);
+    query_sql: |
+      MERGE INTO cov_w_mdo_t t USING cov_w_mdo_s s ON t.id = s.id
+      WHEN MATCHED THEN DELETE;
+    teardown_sql: |
+      DROP TABLE cov_w_mdo_t;
+      DROP TABLE cov_w_mdo_s;
+
+  - id: cow-write-merge-insert-only
+    feature: cow-write
+    operation: merge-insert-only
+    dtype: int
+    expected: fallback
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_mio_t (id INT, v STRING) USING delta TBLPROPERTIES ('delta.enableDeletionVectors' = 'false');
+      INSERT INTO cov_w_mio_t VALUES (1, 'a');
+      CREATE TABLE cov_w_mio_s (id INT, v STRING) USING delta;
+      INSERT INTO cov_w_mio_s VALUES (2, 'B'), (3, 'C');
+    query_sql: |
+      MERGE INTO cov_w_mio_t t USING cov_w_mio_s s ON t.id = s.id
+      WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v);
+    teardown_sql: |
+      DROP TABLE cov_w_mio_t;
+      DROP TABLE cov_w_mio_s;
+
+  - id: cow-write-merge-not-matched-by-source
+    feature: cow-write
+    operation: merge-nmbs
+    dtype: int
+    expected: fallback
+    upstream_claim: yes
+    delta_min_version: "3.0"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_nmbs_t (id INT, v STRING) USING delta TBLPROPERTIES ('delta.enableDeletionVectors' = 'false');
+      INSERT INTO cov_w_nmbs_t VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      CREATE TABLE cov_w_nmbs_s (id INT) USING delta;
+      INSERT INTO cov_w_nmbs_s VALUES (1);
+    query_sql: |
+      MERGE INTO cov_w_nmbs_t t USING cov_w_nmbs_s s ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET v = 'kept'
+      WHEN NOT MATCHED BY SOURCE THEN DELETE;
+    teardown_sql: |
+      DROP TABLE cov_w_nmbs_t;
+      DROP TABLE cov_w_nmbs_s;
+
+  - id: cow-write-check-constraint
+    feature: table-feature-check
+    operation: insert-with-check
+    dtype: int
+    expected: fallback
+    upstream_claim: no
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_chk (id INT, v INT) USING delta;
+      ALTER TABLE cov_w_chk ADD CONSTRAINT v_pos CHECK (v > 0);
+    query_sql: |
+      INSERT INTO cov_w_chk VALUES (1, 5), (2, 10);
+    teardown_sql: |
+      DROP TABLE cov_w_chk;
+    notes: "DeltaInvariantCheckerExec forces C2R/R2C; per V6 §3.4 falls back."
+
+  - id: cow-write-stats-collection
+    feature: cow-write
+    operation: insert-with-stats
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_stats (id INT, v DOUBLE) USING delta;
+    query_sql: |
+      INSERT INTO cov_w_stats VALUES (1, 1.5), (2, 2.5), (3, 3.5);
+    teardown_sql: |
+      DROP TABLE cov_w_stats;
+    notes: "Native stats collection landed in #11419."
+
+  - id: cow-write-optimized-shuffle
+    feature: cow-write
+    operation: insert-optimized-shuffle
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+      "spark.databricks.delta.optimizeWrite.enabled": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_os (id INT, p INT) USING delta PARTITIONED BY (p);
+    query_sql: |
+      INSERT INTO cov_w_os SELECT id, id % 4 AS p FROM range(20);
+    teardown_sql: |
+      DROP TABLE cov_w_os;
+
+# ============================================================================
+# CoW maintenance
+# ============================================================================
+
+  - id: cow-maintenance-optimize-binpack
+    feature: cow-maintenance
+    operation: optimize-binpack
+    dtype: n/a
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_m_opt (id INT) USING delta;
+      INSERT INTO cov_m_opt VALUES (1);
+      INSERT INTO cov_m_opt VALUES (2);
+      INSERT INTO cov_m_opt VALUES (3);
+    query_sql: |
+      OPTIMIZE cov_m_opt;
+    teardown_sql: |
+      DROP TABLE cov_m_opt;
+
+  - id: cow-maintenance-optimize-where
+    feature: cow-maintenance
+    operation: optimize-with-where
+    dtype: n/a
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_m_optw (id INT, p INT) USING delta PARTITIONED BY (p);
+      INSERT INTO cov_m_optw VALUES (1, 10), (2, 10), (3, 20);
+    query_sql: |
+      OPTIMIZE cov_m_optw WHERE p = 10;
+    teardown_sql: |
+      DROP TABLE cov_m_optw;
+
+  - id: cow-maintenance-optimize-zorder
+    feature: cow-maintenance
+    operation: optimize-zorder
+    dtype: int
+    expected: fallback
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_m_z (id INT, k INT) USING delta;
+      INSERT INTO cov_m_z VALUES (1, 100), (2, 200), (3, 50);
+    query_sql: |
+      OPTIMIZE cov_m_z ZORDER BY (k);
+    teardown_sql: |
+      DROP TABLE cov_m_z;
+
+  - id: cow-maintenance-vacuum
+    feature: cow-maintenance
+    operation: vacuum
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_m_vac (id INT) USING delta;
+      INSERT INTO cov_m_vac VALUES (1);
+    query_sql: |
+      VACUUM cov_m_vac RETAIN 0 HOURS;
+    teardown_sql: |
+      DROP TABLE cov_m_vac;
+    notes: "Inherited (JVM-only); reported as fallback for visibility."
+
+  - id: cow-maintenance-vacuum-lite
+    feature: cow-maintenance
+    operation: vacuum-lite
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    delta_min_version: "3.3"
+    setup_sql: |
+      CREATE TABLE cov_m_vacl (id INT) USING delta;
+      INSERT INTO cov_m_vacl VALUES (1);
+    query_sql: |
+      VACUUM cov_m_vacl LITE;
+    teardown_sql: |
+      DROP TABLE cov_m_vacl;
+
+  - id: cow-maintenance-clone-shallow
+    feature: cow-maintenance
+    operation: clone-shallow
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_m_clss (id INT) USING delta;
+      INSERT INTO cov_m_clss VALUES (1);
+    query_sql: |
+      CREATE TABLE cov_m_clsd SHALLOW CLONE cov_m_clss;
+    teardown_sql: |
+      DROP TABLE cov_m_clsd;
+      DROP TABLE cov_m_clss;
+
+  - id: cow-maintenance-clone-deep
+    feature: cow-maintenance
+    operation: clone-deep
+    dtype: n/a
+    expected: partial
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_m_clds (id INT) USING delta;
+      INSERT INTO cov_m_clds VALUES (1), (2);
+    query_sql: |
+      CREATE TABLE cov_m_clddd DEEP CLONE cov_m_clds;
+    teardown_sql: |
+      DROP TABLE cov_m_clddd;
+      DROP TABLE cov_m_clds;
+
+  - id: cow-maintenance-restore-version
+    feature: cow-maintenance
+    operation: restore-version
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_m_rv (id INT) USING delta;
+      INSERT INTO cov_m_rv VALUES (1);
+      INSERT INTO cov_m_rv VALUES (2);
+    query_sql: |
+      RESTORE TABLE cov_m_rv TO VERSION AS OF 1;
+    teardown_sql: |
+      DROP TABLE cov_m_rv;
+    notes: "Inherited (JVM-only)."
+
+  - id: cow-maintenance-alter-add-column
+    feature: cow-maintenance
+    operation: alter-add-column
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_m_aac (id INT) USING delta;
+    query_sql: |
+      ALTER TABLE cov_m_aac ADD COLUMNS (newcol STRING);
+    teardown_sql: |
+      DROP TABLE cov_m_aac;
+
+  - id: cow-maintenance-alter-drop-column
+    feature: cow-maintenance
+    operation: alter-drop-column
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_m_adc (id INT, x STRING) USING delta
+        TBLPROPERTIES ('delta.columnMapping.mode' = 'name', 'delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5');
+    query_sql: |
+      ALTER TABLE cov_m_adc DROP COLUMN x;
+    teardown_sql: |
+      DROP TABLE cov_m_adc;
+
+  - id: cow-maintenance-alter-rename-column
+    feature: cow-maintenance
+    operation: alter-rename-column
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_m_arc (id INT, x STRING) USING delta
+        TBLPROPERTIES ('delta.columnMapping.mode' = 'name', 'delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5');
+    query_sql: |
+      ALTER TABLE cov_m_arc RENAME COLUMN x TO y;
+    teardown_sql: |
+      DROP TABLE cov_m_arc;
+
+  - id: cow-maintenance-alter-add-default
+    feature: cow-maintenance
+    operation: alter-add-default
+    dtype: n/a
+    expected: unknown
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_m_aad (id INT) USING delta;
+      INSERT INTO cov_m_aad VALUES (1);
+    query_sql: |
+      ALTER TABLE cov_m_aad ADD COLUMN d STRING DEFAULT 'x';
+    teardown_sql: |
+      DROP TABLE cov_m_aad;
+    notes: "Tracks #11494 known wrong-result bug."
+
+  - id: cow-maintenance-alter-add-feature
+    feature: cow-maintenance
+    operation: alter-add-feature
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_m_aaf (id INT) USING delta;
+    query_sql: |
+      ALTER TABLE cov_m_aaf SET TBLPROPERTIES ('delta.feature.deletionVectors' = 'supported');
+    teardown_sql: |
+      DROP TABLE cov_m_aaf;
+
+  - id: cow-maintenance-checkpoint
+    feature: cow-maintenance
+    operation: checkpoint
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_m_chk (id INT) USING delta;
+      INSERT INTO cov_m_chk VALUES (1);
+    query_sql: |
+      INSERT INTO cov_m_chk VALUES (2);
+    teardown_sql: |
+      DROP TABLE cov_m_chk;
+    notes: "Auto-checkpoint inherited from JVM; verify trigger doesn't break native writes."
+
+# ============================================================================
+# MoR reads (DV-enabled)
+# ============================================================================
+
+  - id: mor-read-select-with-deletes
+    feature: mor-read
+    operation: select-with-dv-deletes
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    setup_sql: |
+      CREATE TABLE cov_mor_d (id INT) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_mor_d VALUES (1), (2), (3), (4), (5);
+      DELETE FROM cov_mor_d WHERE id IN (2, 4);
+    query_sql: |
+      SELECT id FROM cov_mor_d ORDER BY id;
+    teardown_sql: |
+      DROP TABLE cov_mor_d;
+
+  - id: mor-read-time-travel-with-dv
+    feature: mor-read
+    operation: time-travel-pre-dv
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    setup_sql: |
+      CREATE TABLE cov_mor_tt (id INT) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_mor_tt VALUES (1), (2), (3);
+      DELETE FROM cov_mor_tt WHERE id = 2;
+    query_sql: |
+      SELECT id FROM cov_mor_tt VERSION AS OF 1;
+    teardown_sql: |
+      DROP TABLE cov_mor_tt;
+
+  - id: mor-read-with-row-tracking
+    feature: mor-read
+    operation: select-with-dv-and-row-tracking
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.2"
+    setup_sql: |
+      CREATE TABLE cov_mor_rt (id INT) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true', 'delta.enableRowTracking' = 'true');
+      INSERT INTO cov_mor_rt VALUES (1), (2), (3);
+      DELETE FROM cov_mor_rt WHERE id = 2;
+    query_sql: |
+      SELECT id FROM cov_mor_rt;
+    teardown_sql: |
+      DROP TABLE cov_mor_rt;
+
+  - id: mor-read-with-column-mapping
+    feature: mor-read
+    operation: select-with-dv-and-column-mapping
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    setup_sql: |
+      CREATE TABLE cov_mor_cm (id INT, v STRING) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true', 'delta.columnMapping.mode' = 'id', 'delta.minReaderVersion' = '3', 'delta.minWriterVersion' = '7');
+      INSERT INTO cov_mor_cm VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      DELETE FROM cov_mor_cm WHERE id = 2;
+    query_sql: |
+      SELECT id, v FROM cov_mor_cm;
+    teardown_sql: |
+      DROP TABLE cov_mor_cm;
+
+  - id: mor-read-with-nested-types
+    feature: mor-read
+    operation: select-with-dv-and-nested
+    dtype: struct
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    setup_sql: |
+      CREATE TABLE cov_mor_n (id INT, s STRUCT<a:INT,b:STRING>) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_mor_n VALUES (1, named_struct('a', 10, 'b', 'x')),
+                                   (2, named_struct('a', 20, 'b', 'y')),
+                                   (3, named_struct('a', 30, 'b', 'z'));
+      DELETE FROM cov_mor_n WHERE id = 2;
+    query_sql: |
+      SELECT id, s.a FROM cov_mor_n;
+    teardown_sql: |
+      DROP TABLE cov_mor_n;
+
+  - id: mor-read-cdf-with-dv
+    feature: cdc
+    operation: cdf-with-dv
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    setup_sql: |
+      CREATE TABLE cov_mor_cdf (id INT) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true', 'delta.enableChangeDataFeed' = 'true');
+      INSERT INTO cov_mor_cdf VALUES (1), (2);
+      DELETE FROM cov_mor_cdf WHERE id = 1;
+    query_sql: |
+      SELECT * FROM table_changes('cov_mor_cdf', 0, 2);
+    teardown_sql: |
+      DROP TABLE cov_mor_cdf;
+
+# ============================================================================
+# MoR writes
+# ============================================================================
+
+  - id: mor-write-delete-with-dv
+    feature: mor-write
+    operation: delete-with-dv
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_morw_d (id INT, v STRING) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_morw_d VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd');
+    query_sql: |
+      DELETE FROM cov_morw_d WHERE id = 2;
+    teardown_sql: |
+      DROP TABLE cov_morw_d;
+
+  - id: mor-write-update-with-dv
+    feature: mor-write
+    operation: update-with-dv
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_morw_u (id INT, v STRING) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_morw_u VALUES (1, 'a'), (2, 'b'), (3, 'c');
+    query_sql: |
+      UPDATE cov_morw_u SET v = 'updated' WHERE id = 2;
+    teardown_sql: |
+      DROP TABLE cov_morw_u;
+
+  - id: mor-write-merge-classic-with-dv
+    feature: mor-write
+    operation: merge-with-dv
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_morw_mt (id INT, v STRING) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_morw_mt VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      CREATE TABLE cov_morw_ms (id INT, v STRING) USING delta;
+      INSERT INTO cov_morw_ms VALUES (2, 'B'), (4, 'D');
+    query_sql: |
+      MERGE INTO cov_morw_mt t USING cov_morw_ms s ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET v = s.v
+      WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v);
+    teardown_sql: |
+      DROP TABLE cov_morw_mt;
+      DROP TABLE cov_morw_ms;
+
+  - id: mor-write-merge-not-matched-by-source-with-dv
+    feature: mor-write
+    operation: merge-nmbs-with-dv
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_morw_nmbs_t (id INT, v STRING) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_morw_nmbs_t VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      CREATE TABLE cov_morw_nmbs_s (id INT) USING delta;
+      INSERT INTO cov_morw_nmbs_s VALUES (1);
+    query_sql: |
+      MERGE INTO cov_morw_nmbs_t t USING cov_morw_nmbs_s s ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET v = 'matched'
+      WHEN NOT MATCHED BY SOURCE THEN DELETE;
+    teardown_sql: |
+      DROP TABLE cov_morw_nmbs_t;
+      DROP TABLE cov_morw_nmbs_s;
+
+  - id: mor-write-merge-cardinality-violation
+    feature: mor-write
+    operation: merge-cardinality-violation
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_morw_cv_t (id INT, v STRING) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_morw_cv_t VALUES (1, 'a'), (2, 'b');
+      CREATE TABLE cov_morw_cv_s (id INT, v STRING) USING delta;
+      INSERT INTO cov_morw_cv_s VALUES (1, 'A'), (1, 'A2');
+    query_sql: |
+      MERGE INTO cov_morw_cv_t t USING cov_morw_cv_s s ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET v = s.v;
+    teardown_sql: |
+      DROP TABLE cov_morw_cv_t;
+      DROP TABLE cov_morw_cv_s;
+    notes: "Tracks #11912 - MERGE cardinality-violation error class lost across JNI."
+
+  - id: mor-write-insert-into-dv-table
+    feature: mor-write
+    operation: insert-into-dv-table
+    dtype: int
+    expected: native
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_morw_ins (id INT) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+    query_sql: |
+      INSERT INTO cov_morw_ins VALUES (1), (2), (3);
+    teardown_sql: |
+      DROP TABLE cov_morw_ins;
+
+# ============================================================================
+# MoR maintenance
+# ============================================================================
+
+  - id: mor-maintenance-reorg-purge
+    feature: mor-maintenance
+    operation: reorg-purge
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    delta_min_version: "3.0"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_morm_p (id INT) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_morm_p VALUES (1), (2), (3);
+      DELETE FROM cov_morm_p WHERE id = 2;
+    query_sql: |
+      REORG TABLE cov_morm_p APPLY (PURGE);
+    teardown_sql: |
+      DROP TABLE cov_morm_p;
+
+  - id: mor-maintenance-vacuum-with-dv
+    feature: mor-maintenance
+    operation: vacuum-with-dv
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    delta_min_version: "3.0"
+    setup_sql: |
+      CREATE TABLE cov_morm_v (id INT) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_morm_v VALUES (1), (2);
+      DELETE FROM cov_morm_v WHERE id = 1;
+    query_sql: |
+      VACUUM cov_morm_v RETAIN 0 HOURS;
+    teardown_sql: |
+      DROP TABLE cov_morm_v;
+
+  - id: mor-maintenance-optimize-with-dv
+    feature: mor-maintenance
+    operation: optimize-with-dv
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    delta_min_version: "3.0"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_morm_o (id INT) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_morm_o VALUES (1);
+      INSERT INTO cov_morm_o VALUES (2);
+      INSERT INTO cov_morm_o VALUES (3);
+      DELETE FROM cov_morm_o WHERE id = 2;
+    query_sql: |
+      OPTIMIZE cov_morm_o;
+    teardown_sql: |
+      DROP TABLE cov_morm_o;
+
+  - id: mor-maintenance-clone-with-dv
+    feature: mor-maintenance
+    operation: clone-with-dv
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    delta_min_version: "3.0"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_morm_cs (id INT) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_morm_cs VALUES (1), (2);
+      DELETE FROM cov_morm_cs WHERE id = 1;
+    query_sql: |
+      CREATE TABLE cov_morm_cd DEEP CLONE cov_morm_cs;
+    teardown_sql: |
+      DROP TABLE cov_morm_cd;
+      DROP TABLE cov_morm_cs;
+
+# ============================================================================
+# Table feature verification (round-trips)
+# ============================================================================
+
+  - id: table-feature-cdc-roundtrip
+    feature: table-feature-cdc
+    operation: write-then-read
+    dtype: int
+    expected: partial
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_tf_cdc (id INT) USING delta
+        TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true');
+      INSERT INTO cov_tf_cdc VALUES (1), (2);
+      UPDATE cov_tf_cdc SET id = id + 100 WHERE id = 1;
+    query_sql: |
+      SELECT id, _change_type FROM table_changes('cov_tf_cdc', 1, 2);
+    teardown_sql: |
+      DROP TABLE cov_tf_cdc;
+
+  - id: table-feature-liquid-clustering
+    feature: table-feature-liquid
+    operation: insert-then-select
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    delta_min_version: "3.2"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_tf_lc (id INT, k INT) USING delta CLUSTER BY (k);
+      INSERT INTO cov_tf_lc VALUES (1, 100), (2, 200), (3, 50);
+    query_sql: |
+      SELECT id FROM cov_tf_lc WHERE k = 100;
+    teardown_sql: |
+      DROP TABLE cov_tf_lc;
+
+  - id: table-feature-row-tracking-stable-id
+    feature: table-feature-row-tracking
+    operation: insert-then-read-id
+    dtype: n/a
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.2"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_tf_rt (id INT) USING delta
+        TBLPROPERTIES ('delta.enableRowTracking' = 'true');
+      INSERT INTO cov_tf_rt VALUES (1), (2), (3);
+    query_sql: |
+      SELECT id, _metadata.row_id FROM cov_tf_rt;
+    teardown_sql: |
+      DROP TABLE cov_tf_rt;
+
+  - id: table-feature-dv-roundtrip
+    feature: table-feature-dv
+    operation: insert-then-delete-then-select
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    delta_min_version: "3.0"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_tf_dv (id INT) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');
+      INSERT INTO cov_tf_dv VALUES (1), (2), (3);
+      DELETE FROM cov_tf_dv WHERE id = 2;
+    query_sql: |
+      SELECT id FROM cov_tf_dv ORDER BY id;
+    teardown_sql: |
+      DROP TABLE cov_tf_dv;
+
+  - id: table-feature-tsntz-roundtrip
+    feature: table-feature-tsntz
+    operation: insert-then-select
+    dtype: timestamp_ntz
+    expected: fallback
+    upstream_claim: no
+    delta_min_version: "3.2"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_tf_ntz (id INT, ts TIMESTAMP_NTZ) USING delta;
+      INSERT INTO cov_tf_ntz VALUES (1, TIMESTAMP_NTZ '2024-06-01 12:00:00'),
+                                    (2, TIMESTAMP_NTZ '2024-06-02 13:00:00');
+    query_sql: |
+      SELECT id, ts FROM cov_tf_ntz WHERE ts > TIMESTAMP_NTZ '2024-06-01 18:00:00';
+    teardown_sql: |
+      DROP TABLE cov_tf_ntz;
+
+  - id: table-feature-type-widening-roundtrip
+    feature: table-feature-type-widening
+    operation: insert-widen-select
+    dtype: int-to-bigint
+    expected: partial
+    upstream_claim: partial
+    delta_min_version: "3.2"
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_tf_tw (id INT) USING delta
+        TBLPROPERTIES ('delta.enableTypeWidening' = 'true');
+      INSERT INTO cov_tf_tw VALUES (1), (2);
+      ALTER TABLE cov_tf_tw ALTER COLUMN id TYPE BIGINT;
+    query_sql: |
+      SELECT id FROM cov_tf_tw;
+    teardown_sql: |
+      DROP TABLE cov_tf_tw;
+
+  - id: table-feature-identity-allocation
+    feature: table-feature-identity
+    operation: insert-then-read
+    dtype: bigint
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_tf_idn (id BIGINT GENERATED ALWAYS AS IDENTITY, v STRING) USING delta;
+      INSERT INTO cov_tf_idn (v) VALUES ('a'), ('b'), ('c');
+    query_sql: |
+      SELECT id, v FROM cov_tf_idn ORDER BY id;
+    teardown_sql: |
+      DROP TABLE cov_tf_idn;
+
+  - id: table-feature-column-mapping-roundtrip
+    feature: table-feature-column-mapping
+    operation: insert-rename-read
+    dtype: int
+    expected: fallback
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_tf_cm (id INT, v STRING) USING delta
+        TBLPROPERTIES ('delta.columnMapping.mode' = 'name', 'delta.minReaderVersion' = '2', 'delta.minWriterVersion' = '5');
+      INSERT INTO cov_tf_cm VALUES (1, 'a');
+      ALTER TABLE cov_tf_cm RENAME COLUMN v TO v2;
+    query_sql: |
+      SELECT id, v2 FROM cov_tf_cm;
+    teardown_sql: |
+      DROP TABLE cov_tf_cm;
+
+# ============================================================================
+# Defensive verification — Delta tables with no Delta-specific features set
+# ============================================================================
+
+  - id: cow-read-empty-table
+    feature: cow-read
+    operation: select-empty
+    dtype: n/a
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_emp (id INT) USING delta;
+    query_sql: |
+      SELECT count(*) FROM cov_r_emp;
+    teardown_sql: |
+      DROP TABLE cov_r_emp;
+
+  - id: cow-read-aggregate-sum
+    feature: cow-read
+    operation: aggregate-sum
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_agg (id INT, v INT) USING delta;
+      INSERT INTO cov_r_agg VALUES (1, 10), (2, 20), (3, 30);
+    query_sql: |
+      SELECT sum(v) FROM cov_r_agg;
+    teardown_sql: |
+      DROP TABLE cov_r_agg;
+
+  - id: cow-read-aggregate-groupby
+    feature: cow-read
+    operation: aggregate-groupby
+    dtype: mixed
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_gb (k STRING, v INT) USING delta;
+      INSERT INTO cov_r_gb VALUES ('a', 1), ('b', 2), ('a', 3), ('c', 4);
+    query_sql: |
+      SELECT k, sum(v) FROM cov_r_gb GROUP BY k;
+    teardown_sql: |
+      DROP TABLE cov_r_gb;
+
+  - id: cow-read-join-broadcast
+    feature: cow-read
+    operation: join-broadcast
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_j_l (id INT, v STRING) USING delta;
+      INSERT INTO cov_r_j_l VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      CREATE TABLE cov_r_j_r (id INT, w STRING) USING delta;
+      INSERT INTO cov_r_j_r VALUES (1, 'X'), (2, 'Y');
+    query_sql: |
+      SELECT l.id, l.v, r.w FROM cov_r_j_l l JOIN cov_r_j_r r ON l.id = r.id;
+    teardown_sql: |
+      DROP TABLE cov_r_j_l;
+      DROP TABLE cov_r_j_r;
+
+  - id: cow-read-window-function
+    feature: cow-read
+    operation: window-function
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_win (k STRING, v INT) USING delta;
+      INSERT INTO cov_r_win VALUES ('a', 1), ('a', 2), ('b', 3), ('b', 4);
+    query_sql: |
+      SELECT k, v, row_number() OVER (PARTITION BY k ORDER BY v) AS rn FROM cov_r_win;
+    teardown_sql: |
+      DROP TABLE cov_r_win;
+
+  - id: cow-read-sort
+    feature: cow-read
+    operation: order-by
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_sort (id INT) USING delta;
+      INSERT INTO cov_r_sort VALUES (3), (1), (4), (1), (5), (9), (2), (6);
+    query_sql: |
+      SELECT id FROM cov_r_sort ORDER BY id;
+    teardown_sql: |
+      DROP TABLE cov_r_sort;
+
+  - id: cow-read-limit
+    feature: cow-read
+    operation: limit
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_lim (id INT) USING delta;
+      INSERT INTO cov_r_lim VALUES (1), (2), (3), (4), (5);
+    query_sql: |
+      SELECT id FROM cov_r_lim ORDER BY id LIMIT 3;
+    teardown_sql: |
+      DROP TABLE cov_r_lim;
+
+# ============================================================================
+# Type-coverage expansion: decimal
+# ============================================================================
+
+  - id: cow-read-decimal-small
+    feature: cow-read
+    operation: select
+    dtype: decimal(10,2)
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_dec_s (id INT, amt DECIMAL(10,2)) USING delta;
+      INSERT INTO cov_dec_s VALUES (1, 12.34), (2, 567.89), (3, 0.05);
+    query_sql: |
+      SELECT id, amt FROM cov_dec_s WHERE amt > 10.00;
+    teardown_sql: |
+      DROP TABLE cov_dec_s;
+
+  - id: cow-read-decimal-large
+    feature: cow-read
+    operation: select
+    dtype: decimal(38,18)
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_dec_l (id INT, amt DECIMAL(38,18)) USING delta;
+      INSERT INTO cov_dec_l VALUES
+        (1, 1234567890.123456789012345678),
+        (2, 0.000000000000000001),
+        (3, 99999999999999999999.999999999999999999);
+    query_sql: |
+      SELECT id, amt FROM cov_dec_l WHERE amt > 1.0;
+    teardown_sql: |
+      DROP TABLE cov_dec_l;
+
+  - id: cow-read-decimal-aggregate
+    feature: cow-read
+    operation: aggregate-sum-decimal
+    dtype: decimal(18,4)
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_dec_agg (k STRING, amt DECIMAL(18,4)) USING delta;
+      INSERT INTO cov_dec_agg VALUES ('a', 100.0001), ('a', 200.0002), ('b', 50.5);
+    query_sql: |
+      SELECT k, sum(amt), avg(amt) FROM cov_dec_agg GROUP BY k;
+    teardown_sql: |
+      DROP TABLE cov_dec_agg;
+
+  - id: cow-write-insert-decimal
+    feature: cow-write
+    operation: insert-into-decimal
+    dtype: decimal(18,4)
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_dec (id INT, amt DECIMAL(18,4)) USING delta;
+    query_sql: |
+      INSERT INTO cov_w_dec VALUES (1, 12.3456), (2, 999.9999), (3, 0.0001);
+    teardown_sql: |
+      DROP TABLE cov_w_dec;
+
+  - id: cow-write-update-decimal
+    feature: cow-write
+    operation: update-decimal
+    dtype: decimal(18,4)
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_u_dec (id INT, amt DECIMAL(18,4)) USING delta;
+      INSERT INTO cov_u_dec VALUES (1, 100.0), (2, 200.0), (3, 300.0);
+    query_sql: |
+      UPDATE cov_u_dec SET amt = amt * 1.1 WHERE id = 2;
+    teardown_sql: |
+      DROP TABLE cov_u_dec;
+
+  - id: cow-write-merge-decimal-target
+    feature: cow-write
+    operation: merge-decimal-target
+    dtype: decimal(18,4)
+    expected: fallback
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_m_dec_t (id INT, amt DECIMAL(18,4)) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'false');
+      INSERT INTO cov_m_dec_t VALUES (1, 100.0), (2, 200.0);
+      CREATE TABLE cov_m_dec_s (id INT, amt DECIMAL(18,4)) USING delta;
+      INSERT INTO cov_m_dec_s VALUES (2, 250.5), (3, 300.0);
+    query_sql: |
+      MERGE INTO cov_m_dec_t t USING cov_m_dec_s s ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET amt = s.amt
+      WHEN NOT MATCHED THEN INSERT (id, amt) VALUES (s.id, s.amt);
+    teardown_sql: |
+      DROP TABLE cov_m_dec_t;
+      DROP TABLE cov_m_dec_s;
+
+  - id: cow-maintenance-optimize-decimal
+    feature: cow-maintenance
+    operation: optimize-decimal
+    dtype: decimal(18,4)
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_opt_dec (id INT, amt DECIMAL(18,4)) USING delta;
+      INSERT INTO cov_opt_dec VALUES (1, 1.5);
+      INSERT INTO cov_opt_dec VALUES (2, 2.5);
+      INSERT INTO cov_opt_dec VALUES (3, 3.5);
+    query_sql: |
+      OPTIMIZE cov_opt_dec;
+    teardown_sql: |
+      DROP TABLE cov_opt_dec;
+
+  - id: cow-write-stats-decimal
+    feature: cow-write
+    operation: insert-stats-decimal
+    dtype: decimal(38,18)
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_stats_dec (id INT, amt DECIMAL(38,18)) USING delta;
+    query_sql: |
+      INSERT INTO cov_stats_dec VALUES
+        (1, 1234567890.123456789012345678),
+        (2, 0.000000000000000001);
+    teardown_sql: |
+      DROP TABLE cov_stats_dec;
+
+# ============================================================================
+# Type-coverage expansion: timestamp / date
+# ============================================================================
+
+  - id: cow-read-timestamp
+    feature: cow-read
+    operation: select
+    dtype: timestamp
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_r_ts (id INT, ts TIMESTAMP) USING delta;
+      INSERT INTO cov_r_ts VALUES (1, TIMESTAMP '2024-01-01 12:00:00'),
+                                  (2, TIMESTAMP '2024-06-15 18:30:00'),
+                                  (3, TIMESTAMP '2024-12-31 23:59:59');
+    query_sql: |
+      SELECT id, ts FROM cov_r_ts WHERE ts > TIMESTAMP '2024-06-01 00:00:00';
+    teardown_sql: |
+      DROP TABLE cov_r_ts;
+
+  - id: cow-read-date
+    feature: cow-read
+    operation: select
+    dtype: date
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_r_d (id INT, dt DATE) USING delta;
+      INSERT INTO cov_r_d VALUES (1, DATE '2024-01-01'),
+                                 (2, DATE '2024-06-15'),
+                                 (3, DATE '2024-12-31');
+    query_sql: |
+      SELECT id, dt FROM cov_r_d WHERE dt BETWEEN DATE '2024-03-01' AND DATE '2024-09-01';
+    teardown_sql: |
+      DROP TABLE cov_r_d;
+
+  - id: cow-read-date-functions
+    feature: cow-read
+    operation: date-functions
+    dtype: date
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_r_df (id INT, dt DATE) USING delta;
+      INSERT INTO cov_r_df VALUES (1, DATE '2024-03-15'), (2, DATE '2024-08-20');
+    query_sql: |
+      SELECT id, year(dt), month(dt), day(dt), date_add(dt, 7) FROM cov_r_df;
+    teardown_sql: |
+      DROP TABLE cov_r_df;
+
+  - id: cow-write-insert-timestamp
+    feature: cow-write
+    operation: insert-timestamp
+    dtype: timestamp
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_ts (id INT, ts TIMESTAMP) USING delta;
+    query_sql: |
+      INSERT INTO cov_w_ts VALUES (1, TIMESTAMP '2024-01-01 00:00:00'),
+                                  (2, TIMESTAMP '2024-06-15 12:30:00');
+    teardown_sql: |
+      DROP TABLE cov_w_ts;
+
+  - id: cow-write-insert-date-partitioned
+    feature: cow-write
+    operation: insert-partitioned-date
+    dtype: date
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_dp (id INT, dt DATE) USING delta PARTITIONED BY (dt);
+    query_sql: |
+      INSERT INTO cov_w_dp VALUES (1, DATE '2024-01-01'), (2, DATE '2024-01-02');
+    teardown_sql: |
+      DROP TABLE cov_w_dp;
+
+  - id: cow-write-update-timestamp
+    feature: cow-write
+    operation: update-timestamp
+    dtype: timestamp
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_u_ts (id INT, ts TIMESTAMP) USING delta;
+      INSERT INTO cov_u_ts VALUES (1, TIMESTAMP '2024-01-01 00:00:00'),
+                                  (2, TIMESTAMP '2024-06-15 12:00:00');
+    query_sql: |
+      UPDATE cov_u_ts SET ts = TIMESTAMP '2025-01-01 00:00:00' WHERE id = 1;
+    teardown_sql: |
+      DROP TABLE cov_u_ts;
+
+  - id: cow-write-merge-date-key
+    feature: cow-write
+    operation: merge-date-key
+    dtype: date
+    expected: fallback
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_m_d_t (dt DATE, v INT) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'false');
+      INSERT INTO cov_m_d_t VALUES (DATE '2024-01-01', 1), (DATE '2024-01-02', 2);
+      CREATE TABLE cov_m_d_s (dt DATE, v INT) USING delta;
+      INSERT INTO cov_m_d_s VALUES (DATE '2024-01-02', 22), (DATE '2024-01-03', 33);
+    query_sql: |
+      MERGE INTO cov_m_d_t t USING cov_m_d_s s ON t.dt = s.dt
+      WHEN MATCHED THEN UPDATE SET v = s.v
+      WHEN NOT MATCHED THEN INSERT (dt, v) VALUES (s.dt, s.v);
+    teardown_sql: |
+      DROP TABLE cov_m_d_t;
+      DROP TABLE cov_m_d_s;
+
+# ============================================================================
+# Type-coverage expansion: numeric + boolean + binary
+# ============================================================================
+
+  - id: cow-read-bigint
+    feature: cow-read
+    operation: select-bigint
+    dtype: bigint
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_bi (id BIGINT, v STRING) USING delta;
+      INSERT INTO cov_r_bi VALUES (10000000000, 'a'), (20000000000, 'b'), (30000000000, 'c');
+    query_sql: |
+      SELECT id, v FROM cov_r_bi WHERE id > 15000000000;
+    teardown_sql: |
+      DROP TABLE cov_r_bi;
+
+  - id: cow-read-double
+    feature: cow-read
+    operation: select-double
+    dtype: double
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_dbl (id INT, v DOUBLE) USING delta;
+      INSERT INTO cov_r_dbl VALUES (1, 1.5), (2, 2.71828), (3, 3.14159);
+    query_sql: |
+      SELECT id, v FROM cov_r_dbl WHERE v > 2.0;
+    teardown_sql: |
+      DROP TABLE cov_r_dbl;
+
+  - id: cow-read-double-aggregate
+    feature: cow-read
+    operation: avg-double
+    dtype: double
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_dblag (k STRING, v DOUBLE) USING delta;
+      INSERT INTO cov_r_dblag VALUES ('a', 1.0), ('a', 2.0), ('b', 3.0), ('b', 4.0);
+    query_sql: |
+      SELECT k, avg(v), stddev(v) FROM cov_r_dblag GROUP BY k;
+    teardown_sql: |
+      DROP TABLE cov_r_dblag;
+
+  - id: cow-read-float
+    feature: cow-read
+    operation: select-float
+    dtype: float
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_fl (id INT, v FLOAT) USING delta;
+      INSERT INTO cov_r_fl VALUES (1, CAST(1.5 AS FLOAT)), (2, CAST(2.5 AS FLOAT));
+    query_sql: |
+      SELECT id, v FROM cov_r_fl WHERE v > 2.0;
+    teardown_sql: |
+      DROP TABLE cov_r_fl;
+
+  - id: cow-read-boolean
+    feature: cow-read
+    operation: select-boolean
+    dtype: boolean
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_b (id INT, flag BOOLEAN) USING delta;
+      INSERT INTO cov_r_b VALUES (1, true), (2, false), (3, true);
+    query_sql: |
+      SELECT id FROM cov_r_b WHERE flag;
+    teardown_sql: |
+      DROP TABLE cov_r_b;
+
+  - id: cow-write-insert-boolean
+    feature: cow-write
+    operation: insert-boolean
+    dtype: boolean
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_b (id INT, flag BOOLEAN) USING delta;
+    query_sql: |
+      INSERT INTO cov_w_b VALUES (1, true), (2, false), (3, true);
+    teardown_sql: |
+      DROP TABLE cov_w_b;
+
+  - id: cow-read-binary
+    feature: cow-read
+    operation: select-binary
+    dtype: binary
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_bin (id INT, payload BINARY) USING delta;
+      INSERT INTO cov_r_bin VALUES (1, X'48656c6c6f'), (2, X'576f726c64');
+    query_sql: |
+      SELECT id, length(payload) FROM cov_r_bin;
+    teardown_sql: |
+      DROP TABLE cov_r_bin;
+
+  - id: cow-read-tinyint
+    feature: cow-read
+    operation: select-tinyint
+    dtype: tinyint
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_ti (id INT, v TINYINT) USING delta;
+      INSERT INTO cov_r_ti VALUES (1, CAST(10 AS TINYINT)), (2, CAST(20 AS TINYINT));
+    query_sql: |
+      SELECT id, v FROM cov_r_ti WHERE v > 15;
+    teardown_sql: |
+      DROP TABLE cov_r_ti;
+
+  - id: cow-read-smallint
+    feature: cow-read
+    operation: select-smallint
+    dtype: smallint
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_r_si (id INT, v SMALLINT) USING delta;
+      INSERT INTO cov_r_si VALUES (1, CAST(1000 AS SMALLINT)), (2, CAST(2000 AS SMALLINT));
+    query_sql: |
+      SELECT id, v FROM cov_r_si WHERE v > 1500;
+    teardown_sql: |
+      DROP TABLE cov_r_si;
+
+# ============================================================================
+# Join variants
+# ============================================================================
+
+  - id: cow-read-left-outer-join
+    feature: cow-read
+    operation: join-left-outer
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_lo_l (id INT, v STRING) USING delta;
+      INSERT INTO cov_lo_l VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      CREATE TABLE cov_lo_r (id INT, w STRING) USING delta;
+      INSERT INTO cov_lo_r VALUES (1, 'X'), (2, 'Y');
+    query_sql: |
+      SELECT l.id, l.v, r.w FROM cov_lo_l l LEFT OUTER JOIN cov_lo_r r ON l.id = r.id;
+    teardown_sql: |
+      DROP TABLE cov_lo_l;
+      DROP TABLE cov_lo_r;
+
+  - id: cow-read-right-outer-join
+    feature: cow-read
+    operation: join-right-outer
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ro_l (id INT, v STRING) USING delta;
+      INSERT INTO cov_ro_l VALUES (1, 'a'), (2, 'b');
+      CREATE TABLE cov_ro_r (id INT, w STRING) USING delta;
+      INSERT INTO cov_ro_r VALUES (1, 'X'), (2, 'Y'), (3, 'Z');
+    query_sql: |
+      SELECT l.id, l.v, r.w FROM cov_ro_l l RIGHT OUTER JOIN cov_ro_r r ON l.id = r.id;
+    teardown_sql: |
+      DROP TABLE cov_ro_l;
+      DROP TABLE cov_ro_r;
+
+  - id: cow-read-full-outer-join
+    feature: cow-read
+    operation: join-full-outer
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_fo_l (id INT, v STRING) USING delta;
+      INSERT INTO cov_fo_l VALUES (1, 'a'), (2, 'b');
+      CREATE TABLE cov_fo_r (id INT, w STRING) USING delta;
+      INSERT INTO cov_fo_r VALUES (2, 'Y'), (3, 'Z');
+    query_sql: |
+      SELECT l.id, l.v, r.w FROM cov_fo_l l FULL OUTER JOIN cov_fo_r r ON l.id = r.id;
+    teardown_sql: |
+      DROP TABLE cov_fo_l;
+      DROP TABLE cov_fo_r;
+
+  - id: cow-read-self-join
+    feature: cow-read
+    operation: join-self
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_sj (id INT, parent_id INT, v STRING) USING delta;
+      INSERT INTO cov_sj VALUES (1, NULL, 'root'), (2, 1, 'a'), (3, 1, 'b'), (4, 2, 'aa');
+    query_sql: |
+      SELECT child.id, child.v, parent.v AS parent_v
+      FROM cov_sj child LEFT JOIN cov_sj parent ON child.parent_id = parent.id;
+    teardown_sql: |
+      DROP TABLE cov_sj;
+
+  - id: cow-read-sortmerge-join
+    feature: cow-read
+    operation: join-sortmerge
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    config:
+      "spark.sql.autoBroadcastJoinThreshold": "-1"
+    setup_sql: |
+      CREATE TABLE cov_smj_l (id INT, v STRING) USING delta;
+      INSERT INTO cov_smj_l VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd');
+      CREATE TABLE cov_smj_r (id INT, w STRING) USING delta;
+      INSERT INTO cov_smj_r VALUES (2, 'Y'), (3, 'Z'), (5, 'W');
+    query_sql: |
+      SELECT l.id, l.v, r.w FROM cov_smj_l l JOIN cov_smj_r r ON l.id = r.id;
+    teardown_sql: |
+      DROP TABLE cov_smj_l;
+      DROP TABLE cov_smj_r;
+    notes: "Force SMJ via autoBroadcastJoinThreshold = -1."
+
+# ============================================================================
+# Subquery + CTE + UNION patterns
+# ============================================================================
+
+  - id: cow-read-in-subquery
+    feature: cow-read
+    operation: in-subquery
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_sq_t (id INT, v STRING) USING delta;
+      INSERT INTO cov_sq_t VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd');
+      CREATE TABLE cov_sq_f (id INT) USING delta;
+      INSERT INTO cov_sq_f VALUES (2), (3);
+    query_sql: |
+      SELECT id, v FROM cov_sq_t WHERE id IN (SELECT id FROM cov_sq_f);
+    teardown_sql: |
+      DROP TABLE cov_sq_t;
+      DROP TABLE cov_sq_f;
+
+  - id: cow-read-not-in-subquery
+    feature: cow-read
+    operation: not-in-subquery
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_nin_t (id INT) USING delta;
+      INSERT INTO cov_nin_t VALUES (1), (2), (3), (4);
+      CREATE TABLE cov_nin_f (id INT) USING delta;
+      INSERT INTO cov_nin_f VALUES (2);
+    query_sql: |
+      SELECT id FROM cov_nin_t WHERE id NOT IN (SELECT id FROM cov_nin_f WHERE id IS NOT NULL);
+    teardown_sql: |
+      DROP TABLE cov_nin_t;
+      DROP TABLE cov_nin_f;
+
+  - id: cow-read-exists-subquery
+    feature: cow-read
+    operation: exists-subquery
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ex_t (id INT, v STRING) USING delta;
+      INSERT INTO cov_ex_t VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      CREATE TABLE cov_ex_f (id INT, k STRING) USING delta;
+      INSERT INTO cov_ex_f VALUES (2, 'x'), (3, 'y');
+    query_sql: |
+      SELECT id, v FROM cov_ex_t t WHERE EXISTS (SELECT 1 FROM cov_ex_f f WHERE f.id = t.id);
+    teardown_sql: |
+      DROP TABLE cov_ex_t;
+      DROP TABLE cov_ex_f;
+
+  - id: cow-read-scalar-subquery
+    feature: cow-read
+    operation: scalar-subquery
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ssq (id INT, v INT) USING delta;
+      INSERT INTO cov_ssq VALUES (1, 100), (2, 200), (3, 300);
+    query_sql: |
+      SELECT id, v, (SELECT max(v) FROM cov_ssq) AS max_v FROM cov_ssq;
+    teardown_sql: |
+      DROP TABLE cov_ssq;
+
+  - id: cow-read-cte
+    feature: cow-read
+    operation: cte
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_cte (id INT, v INT) USING delta;
+      INSERT INTO cov_cte VALUES (1, 10), (2, 20), (3, 30), (4, 40);
+    query_sql: |
+      WITH big AS (SELECT id, v FROM cov_cte WHERE v > 15)
+      SELECT id, v * 2 AS doubled FROM big;
+    teardown_sql: |
+      DROP TABLE cov_cte;
+
+  - id: cow-read-cte-multiple
+    feature: cow-read
+    operation: cte-multiple
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_cte_m (id INT, v INT) USING delta;
+      INSERT INTO cov_cte_m VALUES (1, 10), (2, 20), (3, 30);
+    query_sql: |
+      WITH a AS (SELECT id, v FROM cov_cte_m WHERE v > 5),
+           b AS (SELECT id, v * 2 AS dv FROM a)
+      SELECT id, dv FROM b WHERE dv > 30;
+    teardown_sql: |
+      DROP TABLE cov_cte_m;
+
+  - id: cow-read-union-all
+    feature: cow-read
+    operation: union-all
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_un_a (id INT, v STRING) USING delta;
+      INSERT INTO cov_un_a VALUES (1, 'a'), (2, 'b');
+      CREATE TABLE cov_un_b (id INT, v STRING) USING delta;
+      INSERT INTO cov_un_b VALUES (3, 'c'), (4, 'd');
+    query_sql: |
+      SELECT id, v FROM cov_un_a UNION ALL SELECT id, v FROM cov_un_b;
+    teardown_sql: |
+      DROP TABLE cov_un_a;
+      DROP TABLE cov_un_b;
+
+  - id: cow-read-union
+    feature: cow-read
+    operation: union-distinct
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_und_a (id INT) USING delta;
+      INSERT INTO cov_und_a VALUES (1), (2), (3);
+      CREATE TABLE cov_und_b (id INT) USING delta;
+      INSERT INTO cov_und_b VALUES (2), (3), (4);
+    query_sql: |
+      SELECT id FROM cov_und_a UNION SELECT id FROM cov_und_b;
+    teardown_sql: |
+      DROP TABLE cov_und_a;
+      DROP TABLE cov_und_b;
+
+  - id: cow-read-intersect
+    feature: cow-read
+    operation: intersect
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_int_a (id INT) USING delta;
+      INSERT INTO cov_int_a VALUES (1), (2), (3);
+      CREATE TABLE cov_int_b (id INT) USING delta;
+      INSERT INTO cov_int_b VALUES (2), (3), (4);
+    query_sql: |
+      SELECT id FROM cov_int_a INTERSECT SELECT id FROM cov_int_b;
+    teardown_sql: |
+      DROP TABLE cov_int_a;
+      DROP TABLE cov_int_b;
+
+  - id: cow-read-except
+    feature: cow-read
+    operation: except
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_exc_a (id INT) USING delta;
+      INSERT INTO cov_exc_a VALUES (1), (2), (3);
+      CREATE TABLE cov_exc_b (id INT) USING delta;
+      INSERT INTO cov_exc_b VALUES (2), (3), (4);
+    query_sql: |
+      SELECT id FROM cov_exc_a EXCEPT SELECT id FROM cov_exc_b;
+    teardown_sql: |
+      DROP TABLE cov_exc_a;
+      DROP TABLE cov_exc_b;
+
+  - id: cow-write-delete-with-subquery
+    feature: cow-write
+    operation: delete-with-subquery
+    dtype: int
+    expected: fallback
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_dsq_t (id INT, v STRING) USING delta;
+      INSERT INTO cov_dsq_t VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd');
+      CREATE TABLE cov_dsq_f (id INT) USING delta;
+      INSERT INTO cov_dsq_f VALUES (2), (4);
+    query_sql: |
+      DELETE FROM cov_dsq_t WHERE id IN (SELECT id FROM cov_dsq_f);
+    teardown_sql: |
+      DROP TABLE cov_dsq_t;
+      DROP TABLE cov_dsq_f;
+
+  - id: cow-write-update-with-subquery
+    feature: cow-write
+    operation: update-with-subquery
+    dtype: int
+    expected: fallback
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_usq_t (id INT, v INT) USING delta;
+      INSERT INTO cov_usq_t VALUES (1, 10), (2, 20), (3, 30);
+      CREATE TABLE cov_usq_f (id INT) USING delta;
+      INSERT INTO cov_usq_f VALUES (2);
+    query_sql: |
+      UPDATE cov_usq_t SET v = v + 1000 WHERE EXISTS (SELECT 1 FROM cov_usq_f f WHERE f.id = cov_usq_t.id);
+    teardown_sql: |
+      DROP TABLE cov_usq_t;
+      DROP TABLE cov_usq_f;
+
+  - id: cow-write-merge-cte-source
+    feature: cow-write
+    operation: merge-cte-source
+    dtype: int
+    expected: fallback
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_mcte_t (id INT, v STRING) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'false');
+      INSERT INTO cov_mcte_t VALUES (1, 'a'), (2, 'b');
+      CREATE TABLE cov_mcte_s (id INT, v STRING) USING delta;
+      INSERT INTO cov_mcte_s VALUES (2, 'B'), (3, 'C'), (4, 'D');
+    query_sql: |
+      MERGE INTO cov_mcte_t t
+      USING (SELECT id, v FROM cov_mcte_s WHERE id > 2) s
+        ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET v = s.v
+      WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v);
+    teardown_sql: |
+      DROP TABLE cov_mcte_t;
+      DROP TABLE cov_mcte_s;
+
+# ============================================================================
+# Cast + null + conditional expressions
+# ============================================================================
+
+  - id: cow-read-cast-string-int
+    feature: cow-read
+    operation: cast-string-to-int
+    dtype: string-to-int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_cast_si (id INT, s STRING) USING delta;
+      INSERT INTO cov_cast_si VALUES (1, '100'), (2, '200'), (3, '300');
+    query_sql: |
+      SELECT id, CAST(s AS INT) AS as_int FROM cov_cast_si WHERE CAST(s AS INT) > 150;
+    teardown_sql: |
+      DROP TABLE cov_cast_si;
+
+  - id: cow-read-cast-string-date
+    feature: cow-read
+    operation: cast-string-to-date
+    dtype: string-to-date
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_cast_sd (id INT, s STRING) USING delta;
+      INSERT INTO cov_cast_sd VALUES (1, '2024-01-01'), (2, '2024-06-15');
+    query_sql: |
+      SELECT id, CAST(s AS DATE) FROM cov_cast_sd;
+    teardown_sql: |
+      DROP TABLE cov_cast_sd;
+
+  - id: cow-read-cast-decimal-bigint
+    feature: cow-read
+    operation: cast-decimal-to-bigint
+    dtype: decimal-to-bigint
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_cast_db (id INT, amt DECIMAL(20,2)) USING delta;
+      INSERT INTO cov_cast_db VALUES (1, 12345678901.23), (2, 98765432109.87);
+    query_sql: |
+      SELECT id, CAST(amt AS BIGINT) FROM cov_cast_db;
+    teardown_sql: |
+      DROP TABLE cov_cast_db;
+
+  - id: cow-read-cast-timestamp-date
+    feature: cow-read
+    operation: cast-timestamp-to-date
+    dtype: timestamp-to-date
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_cast_td (id INT, ts TIMESTAMP) USING delta;
+      INSERT INTO cov_cast_td VALUES (1, TIMESTAMP '2024-01-01 12:00:00'),
+                                     (2, TIMESTAMP '2024-06-15 23:59:59');
+    query_sql: |
+      SELECT id, CAST(ts AS DATE) FROM cov_cast_td;
+    teardown_sql: |
+      DROP TABLE cov_cast_td;
+
+  - id: cow-read-is-null
+    feature: cow-read
+    operation: is-null
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_isn (id INT, v STRING) USING delta;
+      INSERT INTO cov_isn VALUES (1, 'a'), (2, NULL), (3, 'c');
+    query_sql: |
+      SELECT id FROM cov_isn WHERE v IS NULL;
+    teardown_sql: |
+      DROP TABLE cov_isn;
+
+  - id: cow-read-case-when
+    feature: cow-read
+    operation: case-when
+    dtype: mixed
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_cw (id INT, score INT) USING delta;
+      INSERT INTO cov_cw VALUES (1, 95), (2, 70), (3, 50), (4, 30);
+    query_sql: |
+      SELECT id,
+        CASE WHEN score >= 90 THEN 'A'
+             WHEN score >= 70 THEN 'B'
+             WHEN score >= 50 THEN 'C'
+             ELSE 'F' END AS grade
+      FROM cov_cw;
+    teardown_sql: |
+      DROP TABLE cov_cw;
+
+  - id: cow-read-coalesce
+    feature: cow-read
+    operation: coalesce
+    dtype: string
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_co (id INT, a STRING, b STRING, c STRING) USING delta;
+      INSERT INTO cov_co VALUES (1, NULL, 'beta', 'gamma'),
+                                (2, NULL, NULL, 'gamma'),
+                                (3, 'alpha', 'beta', 'gamma');
+    query_sql: |
+      SELECT id, COALESCE(a, b, c) AS first_non_null FROM cov_co;
+    teardown_sql: |
+      DROP TABLE cov_co;
+
+  - id: cow-read-nullif
+    feature: cow-read
+    operation: nullif
+    dtype: string
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ni (id INT, v STRING) USING delta;
+      INSERT INTO cov_ni VALUES (1, 'unknown'), (2, 'real'), (3, 'unknown');
+    query_sql: |
+      SELECT id, NULLIF(v, 'unknown') AS clean FROM cov_ni;
+    teardown_sql: |
+      DROP TABLE cov_ni;
+
+# ============================================================================
+# Aggregate variants
+# ============================================================================
+
+  - id: cow-read-count-distinct
+    feature: cow-read
+    operation: count-distinct
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_cd (k STRING, v INT) USING delta;
+      INSERT INTO cov_cd VALUES ('a', 1), ('a', 2), ('a', 1), ('b', 3), ('b', 3);
+    query_sql: |
+      SELECT k, count(DISTINCT v) FROM cov_cd GROUP BY k;
+    teardown_sql: |
+      DROP TABLE cov_cd;
+
+  - id: cow-read-having
+    feature: cow-read
+    operation: having
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_hv (k STRING, v INT) USING delta;
+      INSERT INTO cov_hv VALUES ('a', 10), ('a', 20), ('b', 5), ('c', 100);
+    query_sql: |
+      SELECT k, sum(v) AS s FROM cov_hv GROUP BY k HAVING sum(v) > 15;
+    teardown_sql: |
+      DROP TABLE cov_hv;
+
+  - id: cow-read-grouping-sets
+    feature: cow-read
+    operation: grouping-sets
+    dtype: mixed
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_gs (region STRING, product STRING, sales INT) USING delta;
+      INSERT INTO cov_gs VALUES ('east','a',10), ('east','b',20), ('west','a',30), ('west','b',40);
+    query_sql: |
+      SELECT region, product, sum(sales) FROM cov_gs
+      GROUP BY GROUPING SETS ((region), (product), (region, product));
+    teardown_sql: |
+      DROP TABLE cov_gs;
+
+  - id: cow-read-rollup
+    feature: cow-read
+    operation: rollup
+    dtype: mixed
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ru (region STRING, product STRING, sales INT) USING delta;
+      INSERT INTO cov_ru VALUES ('east','a',10), ('east','b',20), ('west','a',30);
+    query_sql: |
+      SELECT region, product, sum(sales) FROM cov_ru GROUP BY ROLLUP (region, product);
+    teardown_sql: |
+      DROP TABLE cov_ru;
+
+  - id: cow-read-approx-count-distinct
+    feature: cow-read
+    operation: approx-count-distinct
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_acd (id INT) USING delta;
+      INSERT INTO cov_acd VALUES (1), (2), (1), (3), (2), (4), (5);
+    query_sql: |
+      SELECT approx_count_distinct(id) FROM cov_acd;
+    teardown_sql: |
+      DROP TABLE cov_acd;
+
+# ============================================================================
+# DML edge cases
+# ============================================================================
+
+  - id: cow-write-delete-where-true
+    feature: cow-write
+    operation: delete-all
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_dat (id INT) USING delta;
+      INSERT INTO cov_dat VALUES (1), (2), (3);
+    query_sql: |
+      DELETE FROM cov_dat WHERE true;
+    teardown_sql: |
+      DROP TABLE cov_dat;
+
+  - id: cow-write-update-no-where
+    feature: cow-write
+    operation: update-no-where
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_unw (id INT, v INT) USING delta;
+      INSERT INTO cov_unw VALUES (1, 10), (2, 20), (3, 30);
+    query_sql: |
+      UPDATE cov_unw SET v = v * 2;
+    teardown_sql: |
+      DROP TABLE cov_unw;
+
+  - id: cow-write-insert-aggregate
+    feature: cow-write
+    operation: insert-from-aggregate
+    dtype: mixed
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_ia_src (k STRING, v INT) USING delta;
+      INSERT INTO cov_ia_src VALUES ('a', 1), ('a', 2), ('b', 3), ('b', 4);
+      CREATE TABLE cov_ia_tgt (k STRING, total INT) USING delta;
+    query_sql: |
+      INSERT INTO cov_ia_tgt SELECT k, sum(v) FROM cov_ia_src GROUP BY k;
+    teardown_sql: |
+      DROP TABLE cov_ia_tgt;
+      DROP TABLE cov_ia_src;
+
+  - id: cow-write-insert-overwrite-partition
+    feature: cow-write
+    operation: insert-overwrite-specific-partition
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_iop (id INT, p STRING) USING delta PARTITIONED BY (p);
+      INSERT INTO cov_iop VALUES (1, 'a'), (2, 'a'), (3, 'b');
+    query_sql: |
+      INSERT OVERWRITE cov_iop PARTITION (p = 'a') VALUES (10), (20);
+    teardown_sql: |
+      DROP TABLE cov_iop;
+
+  - id: cow-write-truncate
+    feature: cow-write
+    operation: truncate-table
+    dtype: int
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_tr (id INT) USING delta;
+      INSERT INTO cov_tr VALUES (1), (2), (3);
+    query_sql: |
+      TRUNCATE TABLE cov_tr;
+    teardown_sql: |
+      DROP TABLE cov_tr;
+
+# ============================================================================
+# Nested types DML + complex projections
+# ============================================================================
+
+  - id: cow-write-insert-struct
+    feature: cow-write
+    operation: insert-struct
+    dtype: struct
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_st (id INT, info STRUCT<name: STRING, age: INT>) USING delta;
+    query_sql: |
+      INSERT INTO cov_w_st VALUES (1, named_struct('name', 'Alice', 'age', 30)),
+                                  (2, named_struct('name', 'Bob', 'age', 40));
+    teardown_sql: |
+      DROP TABLE cov_w_st;
+
+  - id: cow-write-insert-array
+    feature: cow-write
+    operation: insert-array
+    dtype: array<int>
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_arr (id INT, tags ARRAY<INT>) USING delta;
+    query_sql: |
+      INSERT INTO cov_w_arr VALUES (1, array(1, 2, 3)), (2, array(4, 5, 6));
+    teardown_sql: |
+      DROP TABLE cov_w_arr;
+
+  - id: cow-read-array-element
+    feature: cow-read
+    operation: array-element-access
+    dtype: array<string>
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_r_arre (id INT, names ARRAY<STRING>) USING delta;
+      INSERT INTO cov_r_arre VALUES (1, array('alice', 'bob')), (2, array('charlie', 'dave', 'eve'));
+    query_sql: |
+      SELECT id, names[0], size(names) FROM cov_r_arre;
+    teardown_sql: |
+      DROP TABLE cov_r_arre;
+
+  - id: cow-read-explode-array
+    feature: cow-read
+    operation: explode-array
+    dtype: array<int>
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_r_exp (id INT, tags ARRAY<INT>) USING delta;
+      INSERT INTO cov_r_exp VALUES (1, array(10, 20)), (2, array(30, 40, 50));
+    query_sql: |
+      SELECT id, tag FROM cov_r_exp LATERAL VIEW explode(tags) AS tag;
+    teardown_sql: |
+      DROP TABLE cov_r_exp;
+
+  - id: cow-write-insert-map
+    feature: cow-write
+    operation: insert-map
+    dtype: map<string,int>
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_w_map (id INT, props MAP<STRING, INT>) USING delta;
+    query_sql: |
+      INSERT INTO cov_w_map VALUES (1, map('a', 1, 'b', 2)),
+                                   (2, map('x', 100));
+    teardown_sql: |
+      DROP TABLE cov_w_map;
+
+  - id: cow-read-map-value
+    feature: cow-read
+    operation: map-value-access
+    dtype: map<string,int>
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_r_mv (id INT, props MAP<STRING, INT>) USING delta;
+      INSERT INTO cov_r_mv VALUES (1, map('count', 10, 'rank', 1)),
+                                  (2, map('count', 20, 'rank', 2));
+    query_sql: |
+      SELECT id, props['count'], map_keys(props) FROM cov_r_mv;
+    teardown_sql: |
+      DROP TABLE cov_r_mv;
+
+  - id: cow-read-deep-nested
+    feature: cow-read
+    operation: deep-nested
+    dtype: struct<array<struct>>
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_dn (
+        id INT,
+        record STRUCT<addresses: ARRAY<STRUCT<city: STRING, zip: INT>>>
+      ) USING delta;
+      INSERT INTO cov_dn VALUES
+        (1, named_struct('addresses', array(named_struct('city', 'sea', 'zip', 98101)))),
+        (2, named_struct('addresses', array(named_struct('city', 'sf', 'zip', 94103),
+                                            named_struct('city', 'pdx', 'zip', 97201))));
+    query_sql: |
+      SELECT id, record.addresses[0].city FROM cov_dn;
+    teardown_sql: |
+      DROP TABLE cov_dn;
+
+# ============================================================================
+# Window function variants
+# ============================================================================
+
+  - id: cow-read-window-lag
+    feature: cow-read
+    operation: window-lag
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_w_lag (k STRING, ts INT, v INT) USING delta;
+      INSERT INTO cov_w_lag VALUES ('a', 1, 10), ('a', 2, 20), ('a', 3, 30), ('b', 1, 100);
+    query_sql: |
+      SELECT k, ts, v, lag(v, 1) OVER (PARTITION BY k ORDER BY ts) AS prev FROM cov_w_lag;
+    teardown_sql: |
+      DROP TABLE cov_w_lag;
+
+  - id: cow-read-window-rank
+    feature: cow-read
+    operation: window-rank
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_w_rank (k STRING, score INT) USING delta;
+      INSERT INTO cov_w_rank VALUES ('a', 90), ('a', 90), ('a', 80), ('b', 95), ('b', 70);
+    query_sql: |
+      SELECT k, score,
+        rank() OVER (PARTITION BY k ORDER BY score DESC) AS r,
+        dense_rank() OVER (PARTITION BY k ORDER BY score DESC) AS dr
+      FROM cov_w_rank;
+    teardown_sql: |
+      DROP TABLE cov_w_rank;
+
+  - id: cow-read-window-running-sum
+    feature: cow-read
+    operation: window-running-sum
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_w_rs (k STRING, ts INT, v INT) USING delta;
+      INSERT INTO cov_w_rs VALUES ('a', 1, 10), ('a', 2, 20), ('a', 3, 30);
+    query_sql: |
+      SELECT k, ts, v,
+        sum(v) OVER (PARTITION BY k ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running
+      FROM cov_w_rs;
+    teardown_sql: |
+      DROP TABLE cov_w_rs;
+
+# ============================================================================
+# DDL gaps
+# ============================================================================
+
+  - id: cow-maintenance-set-tblproperties
+    feature: cow-maintenance
+    operation: alter-set-tblproperties
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_stp (id INT) USING delta;
+    query_sql: |
+      ALTER TABLE cov_stp SET TBLPROPERTIES ('comment' = 'a test table');
+    teardown_sql: |
+      DROP TABLE cov_stp;
+
+  - id: cow-maintenance-unset-tblproperties
+    feature: cow-maintenance
+    operation: alter-unset-tblproperties
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_utp (id INT) USING delta TBLPROPERTIES ('to_remove' = 'yes');
+    query_sql: |
+      ALTER TABLE cov_utp UNSET TBLPROPERTIES ('to_remove');
+    teardown_sql: |
+      DROP TABLE cov_utp;
+
+  - id: cow-maintenance-comment-on
+    feature: cow-maintenance
+    operation: comment-on-table
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_co (id INT) USING delta;
+    query_sql: |
+      COMMENT ON TABLE cov_co IS 'coverage tool test table';
+    teardown_sql: |
+      DROP TABLE cov_co;
+
+  - id: cow-maintenance-create-table-like
+    feature: cow-maintenance
+    operation: create-table-like
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ctl_src (id INT, v STRING) USING delta;
+    query_sql: |
+      CREATE TABLE cov_ctl_dst LIKE cov_ctl_src;
+    teardown_sql: |
+      DROP TABLE cov_ctl_dst;
+      DROP TABLE cov_ctl_src;
+
+  - id: cow-read-describe-extended
+    feature: cow-read
+    operation: describe-extended
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_de (id INT) USING delta;
+      INSERT INTO cov_de VALUES (1);
+    query_sql: |
+      DESCRIBE EXTENDED cov_de;
+    teardown_sql: |
+      DROP TABLE cov_de;
+
+  - id: cow-read-show-create-table
+    feature: cow-read
+    operation: show-create-table
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_sct (id INT, v STRING) USING delta;
+    query_sql: |
+      SHOW CREATE TABLE cov_sct;
+    teardown_sql: |
+      DROP TABLE cov_sct;
+
+  - id: cow-write-merge-multi-when-matched
+    feature: cow-write
+    operation: merge-multi-when-matched
+    dtype: int
+    expected: fallback
+    upstream_claim: yes
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_mwm_t (id INT, v INT, status STRING) USING delta
+        TBLPROPERTIES ('delta.enableDeletionVectors' = 'false');
+      INSERT INTO cov_mwm_t VALUES (1, 10, 'active'), (2, 20, 'archived'), (3, 30, 'active');
+      CREATE TABLE cov_mwm_s (id INT, v INT) USING delta;
+      INSERT INTO cov_mwm_s VALUES (1, 100), (2, 200), (3, 300);
+    query_sql: |
+      MERGE INTO cov_mwm_t t USING cov_mwm_s s ON t.id = s.id
+      WHEN MATCHED AND t.status = 'archived' THEN DELETE
+      WHEN MATCHED AND t.status = 'active' THEN UPDATE SET v = s.v
+      WHEN NOT MATCHED THEN INSERT (id, v, status) VALUES (s.id, s.v, 'active');
+    teardown_sql: |
+      DROP TABLE cov_mwm_t;
+      DROP TABLE cov_mwm_s;
+
+  - id: cow-write-update-with-case-when
+    feature: cow-write
+    operation: update-case-when
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    config:
+      "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
+    setup_sql: |
+      CREATE TABLE cov_ucw (id INT, v INT) USING delta;
+      INSERT INTO cov_ucw VALUES (1, 10), (2, 20), (3, 30);
+    query_sql: |
+      UPDATE cov_ucw SET v = CASE WHEN v < 15 THEN 0 WHEN v < 25 THEN 50 ELSE 100 END;
+    teardown_sql: |
+      DROP TABLE cov_ucw;
+
+# ============================================================================
+# Predicate variety
+# ============================================================================
+
+  - id: cow-read-like-pattern
+    feature: cow-read
+    operation: like-pattern
+    dtype: string
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_lp (id INT, name STRING) USING delta;
+      INSERT INTO cov_lp VALUES (1, 'alice'), (2, 'alex'), (3, 'bob'), (4, 'alfred');
+    query_sql: |
+      SELECT id, name FROM cov_lp WHERE name LIKE 'al%' AND name NOT LIKE '%ce';
+    teardown_sql: |
+      DROP TABLE cov_lp;
+
+  - id: cow-read-regex
+    feature: cow-read
+    operation: regex
+    dtype: string
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_rx (id INT, s STRING) USING delta;
+      INSERT INTO cov_rx VALUES (1, 'foo123'), (2, 'bar456'), (3, 'baz');
+    query_sql: |
+      SELECT id, s FROM cov_rx WHERE s RLIKE '[0-9]+';
+    teardown_sql: |
+      DROP TABLE cov_rx;
+
+  - id: cow-read-string-functions
+    feature: cow-read
+    operation: string-functions
+    dtype: string
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_sf (id INT, s STRING) USING delta;
+      INSERT INTO cov_sf VALUES (1, 'Hello World'), (2, '  trimmed  ');
+    query_sql: |
+      SELECT id, upper(s), length(trim(s)), substring(s, 1, 5) FROM cov_sf;
+    teardown_sql: |
+      DROP TABLE cov_sf;
+
+  - id: cow-read-math-functions
+    feature: cow-read
+    operation: math-functions
+    dtype: double
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_mf (id INT, v DOUBLE) USING delta;
+      INSERT INTO cov_mf VALUES (1, 16.0), (2, 100.0), (3, 0.5);
+    query_sql: |
+      SELECT id, sqrt(v), abs(v - 50), round(v, 1), pow(v, 2) FROM cov_mf;
+    teardown_sql: |
+      DROP TABLE cov_mf;
+
+  - id: cow-read-multi-condition-or
+    feature: cow-read
+    operation: multi-condition-or
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_mo (id INT, region STRING, v INT) USING delta;
+      INSERT INTO cov_mo VALUES (1, 'east', 10), (2, 'west', 20), (3, 'south', 30), (4, 'east', 100);
+    query_sql: |
+      SELECT id FROM cov_mo WHERE (region = 'east' AND v > 50) OR (region = 'west' AND v > 15);
+    teardown_sql: |
+      DROP TABLE cov_mo;

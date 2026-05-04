@@ -1,0 +1,2559 @@
+# Licensed to the Apache Software Foundation (ASF) under one or more
+# contributor license agreements.  See the NOTICE file distributed with
+# this work for additional information regarding copyright ownership.
+# The ASF licenses this file to You under the Apache License, Version 2.0
+# (the "License"); you may not use this file except in compliance with
+# the License.  You may obtain a copy of the License at
+#
+#    http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Iceberg-on-Gluten coverage matrix.
+#
+# Authoring notes:
+#   - Each entry has a unique stable `id`. Renaming is a baseline-breaking change; retire via
+#     `archived: true` and add a new entry instead.
+#   - `expected` is the verdict baseline at the program's M1 starting point on Iceberg
+#     (Iceberg 1.10 + Spark 3.5 + Gluten 1.6/1.7-SNAPSHOT). Per upstream `VeloxIceberg.md`,
+#     Iceberg-on-Gluten is meaningfully more conservative than Delta-on-Gluten:
+#       - Reads on unpartitioned, no-delete tables generally offload.
+#       - Reads on partitioned tables fall back where bucket/year/month transforms appear in
+#         predicates (`BucketFunction` etc. force fallback).
+#       - All writes (INSERT VALUES, INSERT OVERWRITE, UPDATE, DELETE, MERGE) fall back today.
+#         INSERT SELECT may be partial: read offloads, write does not.
+#       - Equality deletes always fall back (validator rejects them).
+#       - All CALL procedures fall back.
+#       - Branch / tag operations fall back.
+#       - Most metadata sub-table reads (.files, .manifests, .history) fall back.
+#       - `.snapshots` reads work native for snapshot_id / parent_id columns.
+#       - UUID, FIXED, timestamptz-in-ORC types fall back.
+#       - V3-only features (geometry, variant, row lineage) fall back.
+#   - The runner needs Iceberg extensions configured on the SparkSession:
+#       spark.sql.extensions = org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions
+#       spark.sql.catalog.spark_catalog = org.apache.iceberg.spark.SparkCatalog (or SparkSessionCatalog)
+#       spark.sql.catalog.spark_catalog.type = hadoop (with a warehouse path)
+#     Pass these via spark-submit --conf or a spark-defaults.conf when invoking the runner.
+#   - SQL strings are passed verbatim to spark.sql(); multi-statement blocks split on `;`.
+#   - Table names prefixed `cov_ib_` and dropped in teardown.
+
+schema_version: 1
+matrix_id: iceberg
+
+entries:
+
+# ============================================================================
+# Iceberg basic reads (unpartitioned, no deletes)
+# ============================================================================
+
+  - id: iceberg-read-select-basic-int
+    feature: iceberg-read
+    operation: select
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_r_int (id INT, payload STRING) USING iceberg;
+      INSERT INTO cov_ib_r_int VALUES (1, 'a'), (2, 'b'), (3, 'c');
+    query_sql: |
+      SELECT id, payload FROM cov_ib_r_int WHERE id > 1;
+    teardown_sql: |
+      DROP TABLE cov_ib_r_int;
+
+  - id: iceberg-read-select-basic-string
+    feature: iceberg-read
+    operation: select
+    dtype: string
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_r_str (s STRING, n INT) USING iceberg;
+      INSERT INTO cov_ib_r_str VALUES ('alpha', 1), ('beta', 2), ('gamma', 3);
+    query_sql: |
+      SELECT s FROM cov_ib_r_str WHERE s LIKE 'a%';
+    teardown_sql: |
+      DROP TABLE cov_ib_r_str;
+
+  - id: iceberg-read-filter-pushdown
+    feature: iceberg-read
+    operation: filter-pushdown
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_r_fp (id INT, v DOUBLE) USING iceberg;
+      INSERT INTO cov_ib_r_fp VALUES (1, 1.5), (2, 2.5), (3, 3.5), (4, 4.5);
+    query_sql: |
+      SELECT id FROM cov_ib_r_fp WHERE id BETWEEN 2 AND 3 AND v > 2.0;
+    teardown_sql: |
+      DROP TABLE cov_ib_r_fp;
+
+  - id: iceberg-read-projection-pushdown
+    feature: iceberg-read
+    operation: projection-pushdown
+    dtype: mixed
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_r_pp (id INT, a STRING, b STRING, c STRING) USING iceberg;
+      INSERT INTO cov_ib_r_pp VALUES (1, 'x', 'y', 'z'), (2, 'p', 'q', 'r');
+    query_sql: |
+      SELECT a FROM cov_ib_r_pp;
+    teardown_sql: |
+      DROP TABLE cov_ib_r_pp;
+
+  - id: iceberg-read-aggregate-sum
+    feature: iceberg-read
+    operation: aggregate-sum
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_r_agg (id INT, v INT) USING iceberg;
+      INSERT INTO cov_ib_r_agg VALUES (1, 10), (2, 20), (3, 30);
+    query_sql: |
+      SELECT sum(v) FROM cov_ib_r_agg;
+    teardown_sql: |
+      DROP TABLE cov_ib_r_agg;
+
+  - id: iceberg-read-aggregate-groupby
+    feature: iceberg-read
+    operation: aggregate-groupby
+    dtype: mixed
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_r_gb (k STRING, v INT) USING iceberg;
+      INSERT INTO cov_ib_r_gb VALUES ('a', 1), ('b', 2), ('a', 3), ('c', 4);
+    query_sql: |
+      SELECT k, sum(v) FROM cov_ib_r_gb GROUP BY k;
+    teardown_sql: |
+      DROP TABLE cov_ib_r_gb;
+
+  - id: iceberg-read-count-distinct
+    feature: iceberg-read
+    operation: count-distinct
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_r_cd (k STRING, v INT) USING iceberg;
+      INSERT INTO cov_ib_r_cd VALUES ('a', 1), ('a', 2), ('a', 1), ('b', 3);
+    query_sql: |
+      SELECT k, count(DISTINCT v) FROM cov_ib_r_cd GROUP BY k;
+    teardown_sql: |
+      DROP TABLE cov_ib_r_cd;
+
+  - id: iceberg-read-having
+    feature: iceberg-read
+    operation: having
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_r_hv (k STRING, v INT) USING iceberg;
+      INSERT INTO cov_ib_r_hv VALUES ('a', 10), ('a', 20), ('b', 5), ('c', 100);
+    query_sql: |
+      SELECT k, sum(v) AS s FROM cov_ib_r_hv GROUP BY k HAVING sum(v) > 15;
+    teardown_sql: |
+      DROP TABLE cov_ib_r_hv;
+
+  - id: iceberg-read-sort
+    feature: iceberg-read
+    operation: order-by
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_r_sort (id INT) USING iceberg;
+      INSERT INTO cov_ib_r_sort VALUES (3), (1), (4), (1), (5), (9), (2), (6);
+    query_sql: |
+      SELECT id FROM cov_ib_r_sort ORDER BY id;
+    teardown_sql: |
+      DROP TABLE cov_ib_r_sort;
+
+  - id: iceberg-read-limit
+    feature: iceberg-read
+    operation: limit
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_r_lim (id INT) USING iceberg;
+      INSERT INTO cov_ib_r_lim VALUES (1), (2), (3), (4), (5);
+    query_sql: |
+      SELECT id FROM cov_ib_r_lim ORDER BY id LIMIT 3;
+    teardown_sql: |
+      DROP TABLE cov_ib_r_lim;
+
+  - id: iceberg-read-broadcast-join
+    feature: iceberg-read
+    operation: join-broadcast
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_j_l (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_j_l VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      CREATE TABLE cov_ib_j_r (id INT, w STRING) USING iceberg;
+      INSERT INTO cov_ib_j_r VALUES (1, 'X'), (2, 'Y');
+    query_sql: |
+      SELECT l.id, l.v, r.w FROM cov_ib_j_l l JOIN cov_ib_j_r r ON l.id = r.id;
+    teardown_sql: |
+      DROP TABLE cov_ib_j_l;
+      DROP TABLE cov_ib_j_r;
+
+  - id: iceberg-read-left-outer-join
+    feature: iceberg-read
+    operation: join-left-outer
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_lo_l (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_lo_l VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      CREATE TABLE cov_ib_lo_r (id INT, w STRING) USING iceberg;
+      INSERT INTO cov_ib_lo_r VALUES (1, 'X'), (2, 'Y');
+    query_sql: |
+      SELECT l.id, l.v, r.w FROM cov_ib_lo_l l LEFT OUTER JOIN cov_ib_lo_r r ON l.id = r.id;
+    teardown_sql: |
+      DROP TABLE cov_ib_lo_l;
+      DROP TABLE cov_ib_lo_r;
+
+  - id: iceberg-read-right-outer-join
+    feature: iceberg-read
+    operation: join-right-outer
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_ro_l (id INT) USING iceberg;
+      INSERT INTO cov_ib_ro_l VALUES (1), (2);
+      CREATE TABLE cov_ib_ro_r (id INT, w STRING) USING iceberg;
+      INSERT INTO cov_ib_ro_r VALUES (1, 'X'), (2, 'Y'), (3, 'Z');
+    query_sql: |
+      SELECT l.id, r.w FROM cov_ib_ro_l l RIGHT OUTER JOIN cov_ib_ro_r r ON l.id = r.id;
+    teardown_sql: |
+      DROP TABLE cov_ib_ro_l;
+      DROP TABLE cov_ib_ro_r;
+
+  - id: iceberg-read-full-outer-join
+    feature: iceberg-read
+    operation: join-full-outer
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_fo_l (id INT) USING iceberg;
+      INSERT INTO cov_ib_fo_l VALUES (1), (2);
+      CREATE TABLE cov_ib_fo_r (id INT) USING iceberg;
+      INSERT INTO cov_ib_fo_r VALUES (2), (3);
+    query_sql: |
+      SELECT l.id, r.id FROM cov_ib_fo_l l FULL OUTER JOIN cov_ib_fo_r r ON l.id = r.id;
+    teardown_sql: |
+      DROP TABLE cov_ib_fo_l;
+      DROP TABLE cov_ib_fo_r;
+
+  - id: iceberg-read-window
+    feature: iceberg-read
+    operation: window-function
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_win (k STRING, v INT) USING iceberg;
+      INSERT INTO cov_ib_win VALUES ('a', 1), ('a', 2), ('b', 3), ('b', 4);
+    query_sql: |
+      SELECT k, v, row_number() OVER (PARTITION BY k ORDER BY v) AS rn FROM cov_ib_win;
+    teardown_sql: |
+      DROP TABLE cov_ib_win;
+
+  - id: iceberg-read-window-rank
+    feature: iceberg-read
+    operation: window-rank
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_wr (k STRING, score INT) USING iceberg;
+      INSERT INTO cov_ib_wr VALUES ('a', 90), ('a', 80), ('b', 95);
+    query_sql: |
+      SELECT k, score, rank() OVER (PARTITION BY k ORDER BY score DESC) FROM cov_ib_wr;
+    teardown_sql: |
+      DROP TABLE cov_ib_wr;
+
+  - id: iceberg-read-cte
+    feature: iceberg-read
+    operation: cte
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_cte (id INT, v INT) USING iceberg;
+      INSERT INTO cov_ib_cte VALUES (1, 10), (2, 20), (3, 30);
+    query_sql: |
+      WITH big AS (SELECT id, v FROM cov_ib_cte WHERE v > 15)
+      SELECT id, v * 2 FROM big;
+    teardown_sql: |
+      DROP TABLE cov_ib_cte;
+
+  - id: iceberg-read-union-all
+    feature: iceberg-read
+    operation: union-all
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_un_a (id INT) USING iceberg;
+      INSERT INTO cov_ib_un_a VALUES (1), (2);
+      CREATE TABLE cov_ib_un_b (id INT) USING iceberg;
+      INSERT INTO cov_ib_un_b VALUES (3), (4);
+    query_sql: |
+      SELECT id FROM cov_ib_un_a UNION ALL SELECT id FROM cov_ib_un_b;
+    teardown_sql: |
+      DROP TABLE cov_ib_un_a;
+      DROP TABLE cov_ib_un_b;
+
+  - id: iceberg-read-in-subquery
+    feature: iceberg-read
+    operation: in-subquery
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_sq_t (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_sq_t VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd');
+      CREATE TABLE cov_ib_sq_f (id INT) USING iceberg;
+      INSERT INTO cov_ib_sq_f VALUES (2), (3);
+    query_sql: |
+      SELECT id, v FROM cov_ib_sq_t WHERE id IN (SELECT id FROM cov_ib_sq_f);
+    teardown_sql: |
+      DROP TABLE cov_ib_sq_t;
+      DROP TABLE cov_ib_sq_f;
+
+  - id: iceberg-read-exists-subquery
+    feature: iceberg-read
+    operation: exists-subquery
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_ex_t (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_ex_t VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      CREATE TABLE cov_ib_ex_f (id INT) USING iceberg;
+      INSERT INTO cov_ib_ex_f VALUES (2);
+    query_sql: |
+      SELECT id, v FROM cov_ib_ex_t t WHERE EXISTS (SELECT 1 FROM cov_ib_ex_f f WHERE f.id = t.id);
+    teardown_sql: |
+      DROP TABLE cov_ib_ex_t;
+      DROP TABLE cov_ib_ex_f;
+
+  - id: iceberg-read-input-file-name
+    feature: iceberg-read
+    operation: input-file-name
+    dtype: n/a
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_ifn (id INT, data STRING) USING iceberg;
+      INSERT INTO cov_ib_ifn VALUES (1, 'a'), (2, 'b'), (3, 'c');
+    query_sql: |
+      SELECT id, input_file_name() FROM cov_ib_ifn ORDER BY id;
+    teardown_sql: |
+      DROP TABLE cov_ib_ifn;
+    notes: "Tested in IcebergSuite; offloads to IcebergScanTransformer."
+
+  - id: iceberg-read-empty-table
+    feature: iceberg-read
+    operation: select-empty
+    dtype: n/a
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_emp (id INT) USING iceberg;
+    query_sql: |
+      SELECT count(*) FROM cov_ib_emp;
+    teardown_sql: |
+      DROP TABLE cov_ib_emp;
+
+  - id: iceberg-read-wide-schema
+    feature: iceberg-read
+    operation: select-wide-schema
+    dtype: mixed
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_wide (
+        c1 INT, c2 INT, c3 INT, c4 INT, c5 INT,
+        c6 INT, c7 INT, c8 INT, c9 INT, c10 INT,
+        c11 STRING, c12 STRING, c13 STRING, c14 STRING, c15 STRING
+      ) USING iceberg;
+      INSERT INTO cov_ib_wide VALUES (1,2,3,4,5,6,7,8,9,10,'a','b','c','d','e');
+    query_sql: |
+      SELECT c1, c5, c10, c15 FROM cov_ib_wide WHERE c1 = 1;
+    teardown_sql: |
+      DROP TABLE cov_ib_wide;
+
+  - id: iceberg-read-nested-types
+    feature: iceberg-read
+    operation: select-nested
+    dtype: struct-array
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_nest (id INT, s STRUCT<a:INT,b:STRING>, arr ARRAY<INT>) USING iceberg;
+      INSERT INTO cov_ib_nest VALUES (1, named_struct('a', 10, 'b', 'x'), array(1,2,3));
+    query_sql: |
+      SELECT id, s.a, arr[0] FROM cov_ib_nest;
+    teardown_sql: |
+      DROP TABLE cov_ib_nest;
+
+# ============================================================================
+# Iceberg partitioned reads (with transforms — many will fall back per upstream)
+# ============================================================================
+
+  - id: iceberg-read-partitioned-identity
+    feature: iceberg-read-partitioned
+    operation: select-partitioned-identity
+    dtype: int
+    expected: partial
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_pp_id (id INT, p INT) USING iceberg PARTITIONED BY (p);
+      INSERT INTO cov_ib_pp_id VALUES (1, 10), (2, 20), (3, 30);
+    query_sql: |
+      SELECT id FROM cov_ib_pp_id WHERE p = 20;
+    teardown_sql: |
+      DROP TABLE cov_ib_pp_id;
+    notes: "Identity partition pruning often offloads; complex partitioned reads can fall back."
+
+  - id: iceberg-read-partitioned-bucket
+    feature: iceberg-read-partitioned
+    operation: select-partitioned-bucket
+    dtype: int
+    expected: fallback
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_pp_bk (id INT, v STRING) USING iceberg PARTITIONED BY (bucket(4, id));
+      INSERT INTO cov_ib_pp_bk VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd');
+    query_sql: |
+      SELECT id, v FROM cov_ib_pp_bk WHERE id = 2;
+    teardown_sql: |
+      DROP TABLE cov_ib_pp_bk;
+    notes: "BucketFunction in predicates triggers fallback per VeloxIceberg.md."
+
+  - id: iceberg-read-partitioned-truncate
+    feature: iceberg-read-partitioned
+    operation: select-partitioned-truncate
+    dtype: string
+    expected: fallback
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_pp_tr (id INT, name STRING) USING iceberg PARTITIONED BY (truncate(2, name));
+      INSERT INTO cov_ib_pp_tr VALUES (1, 'alice'), (2, 'bob'), (3, 'alfred');
+    query_sql: |
+      SELECT id, name FROM cov_ib_pp_tr WHERE name LIKE 'al%';
+    teardown_sql: |
+      DROP TABLE cov_ib_pp_tr;
+
+  - id: iceberg-read-partitioned-year
+    feature: iceberg-read-partitioned
+    operation: select-partitioned-year
+    dtype: timestamp
+    expected: fallback
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_pp_yr (id INT, ts TIMESTAMP) USING iceberg PARTITIONED BY (years(ts));
+      INSERT INTO cov_ib_pp_yr VALUES (1, TIMESTAMP '2024-01-01 00:00:00'),
+                                      (2, TIMESTAMP '2024-06-15 00:00:00'),
+                                      (3, TIMESTAMP '2025-01-01 00:00:00');
+    query_sql: |
+      SELECT id, ts FROM cov_ib_pp_yr WHERE ts >= TIMESTAMP '2024-01-01';
+    teardown_sql: |
+      DROP TABLE cov_ib_pp_yr;
+
+  - id: iceberg-read-partitioned-month
+    feature: iceberg-read-partitioned
+    operation: select-partitioned-month
+    dtype: date
+    expected: fallback
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_pp_mo (id INT, dt DATE) USING iceberg PARTITIONED BY (months(dt));
+      INSERT INTO cov_ib_pp_mo VALUES (1, DATE '2024-01-15'), (2, DATE '2024-03-20');
+    query_sql: |
+      SELECT id, dt FROM cov_ib_pp_mo WHERE dt >= DATE '2024-02-01';
+    teardown_sql: |
+      DROP TABLE cov_ib_pp_mo;
+
+  - id: iceberg-read-partitioned-day
+    feature: iceberg-read-partitioned
+    operation: select-partitioned-day
+    dtype: timestamp
+    expected: fallback
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_pp_dy (id INT, ts TIMESTAMP) USING iceberg PARTITIONED BY (days(ts));
+      INSERT INTO cov_ib_pp_dy VALUES (1, TIMESTAMP '2024-06-15 00:00:00'),
+                                      (2, TIMESTAMP '2024-06-16 00:00:00');
+    query_sql: |
+      SELECT id, ts FROM cov_ib_pp_dy WHERE ts > TIMESTAMP '2024-06-15 12:00:00';
+    teardown_sql: |
+      DROP TABLE cov_ib_pp_dy;
+
+  - id: iceberg-read-partitioned-hour
+    feature: iceberg-read-partitioned
+    operation: select-partitioned-hour
+    dtype: timestamp
+    expected: fallback
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_pp_hr (id INT, ts TIMESTAMP) USING iceberg PARTITIONED BY (hours(ts));
+      INSERT INTO cov_ib_pp_hr VALUES (1, TIMESTAMP '2024-06-15 10:00:00'),
+                                      (2, TIMESTAMP '2024-06-15 11:00:00');
+    query_sql: |
+      SELECT id, ts FROM cov_ib_pp_hr WHERE ts > TIMESTAMP '2024-06-15 10:30:00';
+    teardown_sql: |
+      DROP TABLE cov_ib_pp_hr;
+
+  - id: iceberg-read-multi-col-partitioned
+    feature: iceberg-read-partitioned
+    operation: select-multi-col-partitioned
+    dtype: mixed
+    expected: partial
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_pp_mc (id INT, region STRING, year INT) USING iceberg
+        PARTITIONED BY (region, year);
+      INSERT INTO cov_ib_pp_mc VALUES (1, 'east', 2024), (2, 'west', 2024), (3, 'east', 2025);
+    query_sql: |
+      SELECT id FROM cov_ib_pp_mc WHERE region = 'east' AND year = 2024;
+    teardown_sql: |
+      DROP TABLE cov_ib_pp_mc;
+
+  - id: iceberg-read-partitioned-no-pred
+    feature: iceberg-read-partitioned
+    operation: select-partitioned-no-predicate
+    dtype: int
+    expected: native
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_pp_np (id INT, p INT) USING iceberg PARTITIONED BY (p);
+      INSERT INTO cov_ib_pp_np VALUES (1, 10), (2, 20);
+    query_sql: |
+      SELECT id, p FROM cov_ib_pp_np;
+    teardown_sql: |
+      DROP TABLE cov_ib_pp_np;
+    notes: "Full scan without partition predicate may offload (no transform expression in plan)."
+
+  - id: iceberg-read-bucketed-join
+    feature: iceberg-read-partitioned
+    operation: bucketed-join
+    dtype: int
+    expected: partial
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_bj_l (id INT, v INT) USING iceberg PARTITIONED BY (bucket(8, id));
+      INSERT INTO cov_ib_bj_l VALUES (1, 10), (2, 20);
+      CREATE TABLE cov_ib_bj_r (id INT, w INT) USING iceberg PARTITIONED BY (bucket(8, id));
+      INSERT INTO cov_ib_bj_r VALUES (1, 100), (2, 200);
+    query_sql: |
+      SELECT l.id, l.v, r.w FROM cov_ib_bj_l l JOIN cov_ib_bj_r r ON l.id = r.id;
+    teardown_sql: |
+      DROP TABLE cov_ib_bj_l;
+      DROP TABLE cov_ib_bj_r;
+
+# ============================================================================
+# Iceberg writes (most fallback per upstream)
+# ============================================================================
+
+  - id: iceberg-write-insert-values
+    feature: iceberg-write
+    operation: insert-values
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_w_iv (id INT, v STRING) USING iceberg;
+    query_sql: |
+      INSERT INTO cov_ib_w_iv VALUES (1, 'a'), (2, 'b'), (3, 'c');
+    teardown_sql: |
+      DROP TABLE cov_ib_w_iv;
+    notes: "Direct VALUES insert falls back per VeloxIceberg.md."
+
+  - id: iceberg-write-insert-select
+    feature: iceberg-write
+    operation: insert-select
+    dtype: int
+    expected: partial
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_w_isr (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_w_isr VALUES (1, 'a'), (2, 'b');
+      CREATE TABLE cov_ib_w_ist (id INT, v STRING) USING iceberg;
+    query_sql: |
+      INSERT INTO cov_ib_w_ist SELECT id, v FROM cov_ib_w_isr;
+    teardown_sql: |
+      DROP TABLE cov_ib_w_ist;
+      DROP TABLE cov_ib_w_isr;
+    notes: "Read offloads, write falls back. Per VeloxIceberg.md PartialOffload."
+
+  - id: iceberg-write-insert-overwrite
+    feature: iceberg-write
+    operation: insert-overwrite
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_w_io (id INT) USING iceberg;
+      INSERT INTO cov_ib_w_io VALUES (1), (2);
+    query_sql: |
+      INSERT OVERWRITE cov_ib_w_io VALUES (10), (20);
+    teardown_sql: |
+      DROP TABLE cov_ib_w_io;
+
+  - id: iceberg-write-insert-overwrite-partitioned
+    feature: iceberg-write
+    operation: insert-overwrite-partitioned
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_w_iop (id INT, p INT) USING iceberg PARTITIONED BY (p);
+      INSERT INTO cov_ib_w_iop VALUES (1, 10), (2, 20);
+    query_sql: |
+      INSERT OVERWRITE cov_ib_w_iop PARTITION (p = 10) VALUES (100);
+    teardown_sql: |
+      DROP TABLE cov_ib_w_iop;
+
+  - id: iceberg-write-ctas
+    feature: iceberg-write
+    operation: ctas
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_ctas_src (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_ctas_src VALUES (1, 'a'), (2, 'b');
+    query_sql: |
+      CREATE TABLE cov_ib_ctas_tgt USING iceberg AS SELECT * FROM cov_ib_ctas_src;
+    teardown_sql: |
+      DROP TABLE cov_ib_ctas_tgt;
+      DROP TABLE cov_ib_ctas_src;
+
+  - id: iceberg-write-rtas
+    feature: iceberg-write
+    operation: rtas
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_rtas (id INT) USING iceberg;
+      INSERT INTO cov_ib_rtas VALUES (1);
+    query_sql: |
+      REPLACE TABLE cov_ib_rtas USING iceberg AS SELECT 100 AS id;
+    teardown_sql: |
+      DROP TABLE cov_ib_rtas;
+
+  - id: iceberg-write-partitioned-identity
+    feature: iceberg-write
+    operation: insert-partitioned-identity
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_w_pi (id INT, p STRING) USING iceberg PARTITIONED BY (p);
+    query_sql: |
+      INSERT INTO cov_ib_w_pi VALUES (1, 'a'), (2, 'b'), (3, 'a');
+    teardown_sql: |
+      DROP TABLE cov_ib_w_pi;
+
+  - id: iceberg-write-partitioned-bucket
+    feature: iceberg-write
+    operation: insert-partitioned-bucket
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_w_pb (id INT, v STRING) USING iceberg PARTITIONED BY (bucket(4, id));
+    query_sql: |
+      INSERT INTO cov_ib_w_pb VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd');
+    teardown_sql: |
+      DROP TABLE cov_ib_w_pb;
+
+  - id: iceberg-write-distribution-mode-hash
+    feature: iceberg-write
+    operation: insert-distribution-hash
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_w_dh (id INT, v STRING) USING iceberg
+        TBLPROPERTIES ('write.distribution-mode' = 'hash');
+    query_sql: |
+      INSERT INTO cov_ib_w_dh VALUES (1, 'a'), (2, 'b');
+    teardown_sql: |
+      DROP TABLE cov_ib_w_dh;
+
+  - id: iceberg-write-distribution-mode-range
+    feature: iceberg-write
+    operation: insert-distribution-range
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_w_dr (id INT, v STRING) USING iceberg
+        TBLPROPERTIES ('write.distribution-mode' = 'range');
+    query_sql: |
+      INSERT INTO cov_ib_w_dr VALUES (1, 'a'), (2, 'b');
+    teardown_sql: |
+      DROP TABLE cov_ib_w_dr;
+
+  - id: iceberg-write-update-cow
+    feature: iceberg-write
+    operation: update-cow
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_uc (id INT, v STRING) USING iceberg
+        TBLPROPERTIES ('write.update.mode' = 'copy-on-write');
+      INSERT INTO cov_ib_uc VALUES (1, 'a'), (2, 'b');
+    query_sql: |
+      UPDATE cov_ib_uc SET v = 'updated' WHERE id = 1;
+    teardown_sql: |
+      DROP TABLE cov_ib_uc;
+
+  - id: iceberg-write-delete-cow
+    feature: iceberg-write
+    operation: delete-cow
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_dc (id INT, v STRING) USING iceberg
+        TBLPROPERTIES ('write.delete.mode' = 'copy-on-write');
+      INSERT INTO cov_ib_dc VALUES (1, 'a'), (2, 'b'), (3, 'c');
+    query_sql: |
+      DELETE FROM cov_ib_dc WHERE id = 2;
+    teardown_sql: |
+      DROP TABLE cov_ib_dc;
+
+  - id: iceberg-write-delete-where-true
+    feature: iceberg-write
+    operation: delete-all-cow
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_dat (id INT) USING iceberg;
+      INSERT INTO cov_ib_dat VALUES (1), (2), (3);
+    query_sql: |
+      DELETE FROM cov_ib_dat WHERE true;
+    teardown_sql: |
+      DROP TABLE cov_ib_dat;
+
+  - id: iceberg-write-update-no-where
+    feature: iceberg-write
+    operation: update-no-where
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_unw (id INT, v INT) USING iceberg;
+      INSERT INTO cov_ib_unw VALUES (1, 10), (2, 20);
+    query_sql: |
+      UPDATE cov_ib_unw SET v = v + 1;
+    teardown_sql: |
+      DROP TABLE cov_ib_unw;
+
+# ============================================================================
+# Iceberg writes -- merge-on-read (V2 + write.{delete,update,merge}.mode = MOR)
+# ============================================================================
+
+  - id: iceberg-write-update-mor
+    feature: iceberg-write-mor
+    operation: update-mor
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_um (id INT, v STRING) USING iceberg TBLPROPERTIES (
+        'format-version' = '2',
+        'write.update.mode' = 'merge-on-read');
+      INSERT INTO cov_ib_um VALUES (1, 'a'), (2, 'b');
+    query_sql: |
+      UPDATE cov_ib_um SET v = 'updated' WHERE id = 1;
+    teardown_sql: |
+      DROP TABLE cov_ib_um;
+    notes: "Equality deletes generated by MOR UPDATE. Read of the resulting deletes falls back."
+
+  - id: iceberg-write-delete-mor
+    feature: iceberg-write-mor
+    operation: delete-mor
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_dm (id INT, v STRING) USING iceberg TBLPROPERTIES (
+        'format-version' = '2',
+        'write.delete.mode' = 'merge-on-read');
+      INSERT INTO cov_ib_dm VALUES (1, 'a'), (2, 'b'), (3, 'c');
+    query_sql: |
+      DELETE FROM cov_ib_dm WHERE id = 2;
+    teardown_sql: |
+      DROP TABLE cov_ib_dm;
+
+  - id: iceberg-read-mor-after-delete
+    feature: iceberg-write-mor
+    operation: read-after-mor-delete
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_rmd (id INT, v STRING) USING iceberg TBLPROPERTIES (
+        'format-version' = '2',
+        'write.delete.mode' = 'merge-on-read');
+      INSERT INTO cov_ib_rmd VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd');
+      DELETE FROM cov_ib_rmd WHERE id = 2;
+    query_sql: |
+      SELECT id, v FROM cov_ib_rmd ORDER BY id;
+    teardown_sql: |
+      DROP TABLE cov_ib_rmd;
+    notes: "Read of table with equality deletes falls back per supportIcebergEqualityDeleteRead = false."
+
+  - id: iceberg-read-mor-position-deletes
+    feature: iceberg-write-mor
+    operation: read-with-position-deletes
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_rpd (id INT, v STRING) USING iceberg TBLPROPERTIES (
+        'format-version' = '2',
+        'write.delete.mode' = 'copy-on-write');
+      INSERT INTO cov_ib_rpd VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      DELETE FROM cov_ib_rpd WHERE id = 2;
+    query_sql: |
+      SELECT id, v FROM cov_ib_rpd ORDER BY id;
+    teardown_sql: |
+      DROP TABLE cov_ib_rpd;
+    notes: "COW DELETE generates position-only deletes; subsequent read may offload."
+
+  - id: iceberg-write-merge-mor
+    feature: iceberg-write-mor
+    operation: merge-mor
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_mm_t (id INT, v STRING) USING iceberg TBLPROPERTIES (
+        'format-version' = '2',
+        'write.merge.mode' = 'merge-on-read');
+      INSERT INTO cov_ib_mm_t VALUES (1, 'a'), (2, 'b');
+      CREATE TABLE cov_ib_mm_s (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_mm_s VALUES (2, 'B'), (3, 'C');
+    query_sql: |
+      MERGE INTO cov_ib_mm_t t USING cov_ib_mm_s s ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET v = s.v
+      WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v);
+    teardown_sql: |
+      DROP TABLE cov_ib_mm_t;
+      DROP TABLE cov_ib_mm_s;
+
+# ============================================================================
+# Iceberg MERGE INTO (CoW) variants
+# ============================================================================
+
+  - id: iceberg-merge-classic
+    feature: iceberg-merge
+    operation: merge-classic
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_mc_t (id INT, v STRING) USING iceberg
+        TBLPROPERTIES ('write.merge.mode' = 'copy-on-write');
+      INSERT INTO cov_ib_mc_t VALUES (1, 'a'), (2, 'b');
+      CREATE TABLE cov_ib_mc_s (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_mc_s VALUES (2, 'B'), (3, 'C');
+    query_sql: |
+      MERGE INTO cov_ib_mc_t t USING cov_ib_mc_s s ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET v = s.v
+      WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v);
+    teardown_sql: |
+      DROP TABLE cov_ib_mc_t;
+      DROP TABLE cov_ib_mc_s;
+
+  - id: iceberg-merge-update-only
+    feature: iceberg-merge
+    operation: merge-update-only
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_muo_t (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_muo_t VALUES (1, 'a'), (2, 'b');
+      CREATE TABLE cov_ib_muo_s (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_muo_s VALUES (1, 'A'), (2, 'B');
+    query_sql: |
+      MERGE INTO cov_ib_muo_t t USING cov_ib_muo_s s ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET v = s.v;
+    teardown_sql: |
+      DROP TABLE cov_ib_muo_t;
+      DROP TABLE cov_ib_muo_s;
+
+  - id: iceberg-merge-delete-only
+    feature: iceberg-merge
+    operation: merge-delete-only
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_mdo_t (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_mdo_t VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      CREATE TABLE cov_ib_mdo_s (id INT) USING iceberg;
+      INSERT INTO cov_ib_mdo_s VALUES (2);
+    query_sql: |
+      MERGE INTO cov_ib_mdo_t t USING cov_ib_mdo_s s ON t.id = s.id
+      WHEN MATCHED THEN DELETE;
+    teardown_sql: |
+      DROP TABLE cov_ib_mdo_t;
+      DROP TABLE cov_ib_mdo_s;
+
+  - id: iceberg-merge-insert-only
+    feature: iceberg-merge
+    operation: merge-insert-only
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_mio_t (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_mio_t VALUES (1, 'a');
+      CREATE TABLE cov_ib_mio_s (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_mio_s VALUES (2, 'B'), (3, 'C');
+    query_sql: |
+      MERGE INTO cov_ib_mio_t t USING cov_ib_mio_s s ON t.id = s.id
+      WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v);
+    teardown_sql: |
+      DROP TABLE cov_ib_mio_t;
+      DROP TABLE cov_ib_mio_s;
+
+  - id: iceberg-merge-not-matched-by-source
+    feature: iceberg-merge
+    operation: merge-nmbs
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_nmbs_t (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_nmbs_t VALUES (1, 'a'), (2, 'b'), (3, 'c');
+      CREATE TABLE cov_ib_nmbs_s (id INT) USING iceberg;
+      INSERT INTO cov_ib_nmbs_s VALUES (1);
+    query_sql: |
+      MERGE INTO cov_ib_nmbs_t t USING cov_ib_nmbs_s s ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET v = 'kept'
+      WHEN NOT MATCHED BY SOURCE THEN DELETE;
+    teardown_sql: |
+      DROP TABLE cov_ib_nmbs_t;
+      DROP TABLE cov_ib_nmbs_s;
+
+  - id: iceberg-merge-multi-when-matched
+    feature: iceberg-merge
+    operation: merge-multi-when
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_mwm_t (id INT, v INT, status STRING) USING iceberg;
+      INSERT INTO cov_ib_mwm_t VALUES (1, 10, 'active'), (2, 20, 'archived');
+      CREATE TABLE cov_ib_mwm_s (id INT, v INT) USING iceberg;
+      INSERT INTO cov_ib_mwm_s VALUES (1, 100), (2, 200);
+    query_sql: |
+      MERGE INTO cov_ib_mwm_t t USING cov_ib_mwm_s s ON t.id = s.id
+      WHEN MATCHED AND t.status = 'archived' THEN DELETE
+      WHEN MATCHED THEN UPDATE SET v = s.v;
+    teardown_sql: |
+      DROP TABLE cov_ib_mwm_t;
+      DROP TABLE cov_ib_mwm_s;
+
+  - id: iceberg-merge-with-cte-source
+    feature: iceberg-merge
+    operation: merge-cte-source
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_mcte_t (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_mcte_t VALUES (1, 'a'), (2, 'b');
+      CREATE TABLE cov_ib_mcte_s (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_mcte_s VALUES (2, 'B'), (3, 'C');
+    query_sql: |
+      MERGE INTO cov_ib_mcte_t t
+      USING (SELECT id, v FROM cov_ib_mcte_s WHERE id > 2) s
+        ON t.id = s.id
+      WHEN MATCHED THEN UPDATE SET v = s.v
+      WHEN NOT MATCHED THEN INSERT (id, v) VALUES (s.id, s.v);
+    teardown_sql: |
+      DROP TABLE cov_ib_mcte_t;
+      DROP TABLE cov_ib_mcte_s;
+
+# ============================================================================
+# Iceberg maintenance: CALL procedures, snapshots, compaction
+# ============================================================================
+
+  - id: iceberg-maintenance-rewrite-data-files
+    feature: iceberg-maintenance
+    operation: call-rewrite-data-files
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_rdf (id INT) USING iceberg;
+      INSERT INTO cov_ib_rdf VALUES (1);
+      INSERT INTO cov_ib_rdf VALUES (2);
+      INSERT INTO cov_ib_rdf VALUES (3);
+    query_sql: |
+      CALL spark_catalog.system.rewrite_data_files(table => 'default.cov_ib_rdf');
+    teardown_sql: |
+      DROP TABLE cov_ib_rdf;
+
+  - id: iceberg-maintenance-rewrite-manifests
+    feature: iceberg-maintenance
+    operation: call-rewrite-manifests
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_rmf (id INT) USING iceberg;
+      INSERT INTO cov_ib_rmf VALUES (1), (2), (3);
+    query_sql: |
+      CALL spark_catalog.system.rewrite_manifests(table => 'default.cov_ib_rmf');
+    teardown_sql: |
+      DROP TABLE cov_ib_rmf;
+
+  - id: iceberg-maintenance-expire-snapshots
+    feature: iceberg-maintenance
+    operation: call-expire-snapshots
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_es (id INT) USING iceberg;
+      INSERT INTO cov_ib_es VALUES (1);
+      INSERT INTO cov_ib_es VALUES (2);
+    query_sql: |
+      CALL spark_catalog.system.expire_snapshots(table => 'default.cov_ib_es', older_than => CAST(current_timestamp() AS TIMESTAMP));
+    teardown_sql: |
+      DROP TABLE cov_ib_es;
+
+  - id: iceberg-maintenance-remove-orphan-files
+    feature: iceberg-maintenance
+    operation: call-remove-orphan-files
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_rof (id INT) USING iceberg;
+      INSERT INTO cov_ib_rof VALUES (1);
+    query_sql: |
+      CALL spark_catalog.system.remove_orphan_files(table => 'default.cov_ib_rof', older_than => CAST(current_timestamp() AS TIMESTAMP));
+    teardown_sql: |
+      DROP TABLE cov_ib_rof;
+
+  - id: iceberg-maintenance-rewrite-position-delete-files
+    feature: iceberg-maintenance
+    operation: call-rewrite-position-delete-files
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_rpdf (id INT) USING iceberg TBLPROPERTIES (
+        'format-version' = '2',
+        'write.delete.mode' = 'merge-on-read');
+      INSERT INTO cov_ib_rpdf VALUES (1), (2), (3);
+      DELETE FROM cov_ib_rpdf WHERE id = 2;
+    query_sql: |
+      CALL spark_catalog.system.rewrite_position_delete_files(table => 'default.cov_ib_rpdf');
+    teardown_sql: |
+      DROP TABLE cov_ib_rpdf;
+
+  - id: iceberg-maintenance-snapshot-create
+    feature: iceberg-maintenance
+    operation: call-snapshot
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_snap_src (id INT) USING iceberg;
+      INSERT INTO cov_ib_snap_src VALUES (1);
+    query_sql: |
+      CALL spark_catalog.system.snapshot(source_table => 'default.cov_ib_snap_src', table => 'default.cov_ib_snap_dst');
+    teardown_sql: |
+      DROP TABLE IF EXISTS cov_ib_snap_dst;
+      DROP TABLE cov_ib_snap_src;
+
+  - id: iceberg-maintenance-rollback-to-snapshot
+    feature: iceberg-maintenance
+    operation: call-rollback
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_rb (id INT) USING iceberg;
+      INSERT INTO cov_ib_rb VALUES (1);
+      INSERT INTO cov_ib_rb VALUES (2);
+    query_sql: |
+      CALL spark_catalog.system.rollback_to_snapshot(
+        table => 'default.cov_ib_rb',
+        snapshot_id => (SELECT min(snapshot_id) FROM cov_ib_rb.snapshots));
+    teardown_sql: |
+      DROP TABLE cov_ib_rb;
+
+  - id: iceberg-maintenance-set-current-snapshot
+    feature: iceberg-maintenance
+    operation: call-set-current-snapshot
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_scs (id INT) USING iceberg;
+      INSERT INTO cov_ib_scs VALUES (1);
+      INSERT INTO cov_ib_scs VALUES (2);
+    query_sql: |
+      CALL spark_catalog.system.set_current_snapshot(
+        table => 'default.cov_ib_scs',
+        snapshot_id => (SELECT min(snapshot_id) FROM cov_ib_scs.snapshots));
+    teardown_sql: |
+      DROP TABLE cov_ib_scs;
+
+  - id: iceberg-maintenance-publish-changes
+    feature: iceberg-maintenance
+    operation: call-publish-changes
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_pc (id INT) USING iceberg;
+      INSERT INTO cov_ib_pc VALUES (1);
+    query_sql: |
+      CALL spark_catalog.system.publish_changes(table => 'default.cov_ib_pc', wap_id => 'wap-1');
+    teardown_sql: |
+      DROP TABLE cov_ib_pc;
+    notes: "Likely errors at runtime since no WAP is staged; tests CALL parsing."
+
+  - id: iceberg-maintenance-register-table
+    feature: iceberg-maintenance
+    operation: call-register-table
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_reg_src (id INT) USING iceberg;
+      INSERT INTO cov_ib_reg_src VALUES (1);
+    query_sql: |
+      CALL spark_catalog.system.register_table(
+        table => 'default.cov_ib_reg_dst',
+        metadata_file => 'file:///tmp/nonexistent/metadata.json');
+    teardown_sql: |
+      DROP TABLE cov_ib_reg_src;
+      DROP TABLE IF EXISTS cov_ib_reg_dst;
+    notes: "Will error on metadata file lookup; tests CALL plumbing."
+
+  - id: iceberg-maintenance-migrate-table
+    feature: iceberg-maintenance
+    operation: call-migrate
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_mig (id INT) USING parquet;
+      INSERT INTO cov_ib_mig VALUES (1);
+    query_sql: |
+      CALL spark_catalog.system.migrate(table => 'default.cov_ib_mig');
+    teardown_sql: |
+      DROP TABLE IF EXISTS cov_ib_mig;
+    notes: "Migrate non-iceberg parquet to iceberg; mostly metadata operation, falls back."
+
+  - id: iceberg-maintenance-ancestors-of
+    feature: iceberg-maintenance
+    operation: call-ancestors-of
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_ao (id INT) USING iceberg;
+      INSERT INTO cov_ib_ao VALUES (1);
+      INSERT INTO cov_ib_ao VALUES (2);
+    query_sql: |
+      CALL spark_catalog.system.ancestors_of(table => 'default.cov_ib_ao');
+    teardown_sql: |
+      DROP TABLE cov_ib_ao;
+
+  - id: iceberg-maintenance-statistics
+    feature: iceberg-maintenance
+    operation: call-compute-table-stats
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_cts (id INT, v INT) USING iceberg;
+      INSERT INTO cov_ib_cts VALUES (1, 10), (2, 20);
+    query_sql: |
+      CALL spark_catalog.system.compute_table_stats(table => 'default.cov_ib_cts');
+    teardown_sql: |
+      DROP TABLE cov_ib_cts;
+
+# ============================================================================
+# Iceberg ALTER TABLE family
+# ============================================================================
+
+  - id: iceberg-maintenance-add-column
+    feature: iceberg-maintenance
+    operation: alter-add-column
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_aac (id INT) USING iceberg;
+    query_sql: |
+      ALTER TABLE cov_ib_aac ADD COLUMNS (newcol STRING);
+    teardown_sql: |
+      DROP TABLE cov_ib_aac;
+
+  - id: iceberg-maintenance-drop-column
+    feature: iceberg-maintenance
+    operation: alter-drop-column
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_adc (id INT, x STRING) USING iceberg;
+    query_sql: |
+      ALTER TABLE cov_ib_adc DROP COLUMN x;
+    teardown_sql: |
+      DROP TABLE cov_ib_adc;
+
+  - id: iceberg-maintenance-rename-column
+    feature: iceberg-maintenance
+    operation: alter-rename-column
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_arc (id INT, x STRING) USING iceberg;
+    query_sql: |
+      ALTER TABLE cov_ib_arc RENAME COLUMN x TO y;
+    teardown_sql: |
+      DROP TABLE cov_ib_arc;
+
+  - id: iceberg-maintenance-add-partition-field
+    feature: iceberg-maintenance
+    operation: alter-add-partition-field
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_apf (id INT, region STRING) USING iceberg;
+    query_sql: |
+      ALTER TABLE cov_ib_apf ADD PARTITION FIELD region;
+    teardown_sql: |
+      DROP TABLE cov_ib_apf;
+    notes: "Iceberg-only DDL extension; SQL extensions fall back per VeloxIceberg.md."
+
+  - id: iceberg-maintenance-drop-partition-field
+    feature: iceberg-maintenance
+    operation: alter-drop-partition-field
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_dpf (id INT, region STRING) USING iceberg PARTITIONED BY (region);
+    query_sql: |
+      ALTER TABLE cov_ib_dpf DROP PARTITION FIELD region;
+    teardown_sql: |
+      DROP TABLE cov_ib_dpf;
+
+  - id: iceberg-maintenance-set-write-order
+    feature: iceberg-maintenance
+    operation: alter-write-order
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_swo (id INT, v INT) USING iceberg;
+    query_sql: |
+      ALTER TABLE cov_ib_swo WRITE ORDERED BY id ASC;
+    teardown_sql: |
+      DROP TABLE cov_ib_swo;
+
+  - id: iceberg-maintenance-set-tblproperties
+    feature: iceberg-maintenance
+    operation: alter-set-tblproperties
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_stp (id INT) USING iceberg;
+    query_sql: |
+      ALTER TABLE cov_ib_stp SET TBLPROPERTIES ('comment' = 'test');
+    teardown_sql: |
+      DROP TABLE cov_ib_stp;
+
+  - id: iceberg-maintenance-set-identifier-fields
+    feature: iceberg-maintenance
+    operation: alter-set-identifier-fields
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_sif (id INT NOT NULL, v STRING) USING iceberg;
+    query_sql: |
+      ALTER TABLE cov_ib_sif SET IDENTIFIER FIELDS id;
+    teardown_sql: |
+      DROP TABLE cov_ib_sif;
+
+# ============================================================================
+# Iceberg time travel (snapshot id, timestamp, branch, tag)
+# ============================================================================
+
+  - id: iceberg-time-travel-snapshot-id
+    feature: iceberg-time-travel
+    operation: time-travel-snapshot-id
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_tt (id INT) USING iceberg;
+      INSERT INTO cov_ib_tt VALUES (1);
+      INSERT INTO cov_ib_tt VALUES (2);
+    query_sql: |
+      SELECT id FROM cov_ib_tt VERSION AS OF
+        (SELECT min(snapshot_id) FROM cov_ib_tt.snapshots);
+    teardown_sql: |
+      DROP TABLE cov_ib_tt;
+
+  - id: iceberg-time-travel-timestamp
+    feature: iceberg-time-travel
+    operation: time-travel-timestamp
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_ttts (id INT) USING iceberg;
+      INSERT INTO cov_ib_ttts VALUES (1);
+    query_sql: |
+      SELECT id FROM cov_ib_ttts TIMESTAMP AS OF current_timestamp();
+    teardown_sql: |
+      DROP TABLE cov_ib_ttts;
+
+  - id: iceberg-time-travel-branch
+    feature: iceberg-branch-tag
+    operation: time-travel-branch
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_ttb (id INT) USING iceberg;
+      INSERT INTO cov_ib_ttb VALUES (1);
+      ALTER TABLE cov_ib_ttb CREATE BRANCH `test_branch`;
+    query_sql: |
+      SELECT id FROM cov_ib_ttb VERSION AS OF 'test_branch';
+    teardown_sql: |
+      ALTER TABLE cov_ib_ttb DROP BRANCH `test_branch`;
+      DROP TABLE cov_ib_ttb;
+
+  - id: iceberg-time-travel-tag
+    feature: iceberg-branch-tag
+    operation: time-travel-tag
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_ttt (id INT) USING iceberg;
+      INSERT INTO cov_ib_ttt VALUES (1);
+      ALTER TABLE cov_ib_ttt CREATE TAG `v1`;
+    query_sql: |
+      SELECT id FROM cov_ib_ttt VERSION AS OF 'v1';
+    teardown_sql: |
+      ALTER TABLE cov_ib_ttt DROP TAG `v1`;
+      DROP TABLE cov_ib_ttt;
+
+# ============================================================================
+# Iceberg branch / tag operations
+# ============================================================================
+
+  - id: iceberg-branch-create
+    feature: iceberg-branch-tag
+    operation: create-branch
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_bc (id INT) USING iceberg;
+      INSERT INTO cov_ib_bc VALUES (1);
+    query_sql: |
+      ALTER TABLE cov_ib_bc CREATE BRANCH `feature_branch`;
+    teardown_sql: |
+      DROP TABLE cov_ib_bc;
+
+  - id: iceberg-branch-drop
+    feature: iceberg-branch-tag
+    operation: drop-branch
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_bd (id INT) USING iceberg;
+      INSERT INTO cov_ib_bd VALUES (1);
+      ALTER TABLE cov_ib_bd CREATE BRANCH `to_drop`;
+    query_sql: |
+      ALTER TABLE cov_ib_bd DROP BRANCH `to_drop`;
+    teardown_sql: |
+      DROP TABLE cov_ib_bd;
+
+  - id: iceberg-tag-create
+    feature: iceberg-branch-tag
+    operation: create-tag
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_tc (id INT) USING iceberg;
+      INSERT INTO cov_ib_tc VALUES (1);
+    query_sql: |
+      ALTER TABLE cov_ib_tc CREATE TAG `release_v1`;
+    teardown_sql: |
+      ALTER TABLE cov_ib_tc DROP TAG `release_v1`;
+      DROP TABLE cov_ib_tc;
+
+  - id: iceberg-tag-drop
+    feature: iceberg-branch-tag
+    operation: drop-tag
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_td (id INT) USING iceberg;
+      INSERT INTO cov_ib_td VALUES (1);
+      ALTER TABLE cov_ib_td CREATE TAG `to_remove`;
+    query_sql: |
+      ALTER TABLE cov_ib_td DROP TAG `to_remove`;
+    teardown_sql: |
+      DROP TABLE cov_ib_td;
+
+  - id: iceberg-branch-fast-forward
+    feature: iceberg-branch-tag
+    operation: call-fast-forward
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_ff (id INT) USING iceberg;
+      INSERT INTO cov_ib_ff VALUES (1);
+      ALTER TABLE cov_ib_ff CREATE BRANCH `from_branch`;
+      INSERT INTO cov_ib_ff VALUES (2);
+    query_sql: |
+      CALL spark_catalog.system.fast_forward(
+        table => 'default.cov_ib_ff',
+        branch => 'from_branch',
+        to => 'main');
+    teardown_sql: |
+      DROP TABLE cov_ib_ff;
+
+  - id: iceberg-branch-cherrypick
+    feature: iceberg-branch-tag
+    operation: call-cherrypick
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_cp (id INT) USING iceberg;
+      INSERT INTO cov_ib_cp VALUES (1);
+    query_sql: |
+      CALL spark_catalog.system.cherrypick_snapshot(
+        table => 'default.cov_ib_cp',
+        snapshot_id => (SELECT max(snapshot_id) FROM cov_ib_cp.snapshots));
+    teardown_sql: |
+      DROP TABLE cov_ib_cp;
+
+# ============================================================================
+# Iceberg metadata sub-tables
+# ============================================================================
+
+  - id: iceberg-metadata-snapshots
+    feature: iceberg-read-metadata
+    operation: select-snapshots
+    dtype: n/a
+    expected: native
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_md_sn (id INT) USING iceberg;
+      INSERT INTO cov_ib_md_sn VALUES (1);
+      INSERT INTO cov_ib_md_sn VALUES (2);
+    query_sql: |
+      SELECT snapshot_id, parent_id FROM cov_ib_md_sn.snapshots;
+    teardown_sql: |
+      DROP TABLE cov_ib_md_sn;
+    notes: "snapshot_id / parent_id columns are read native per IcebergSuite tests."
+
+  - id: iceberg-metadata-snapshots-full
+    feature: iceberg-read-metadata
+    operation: select-snapshots-all-cols
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_md_snf (id INT) USING iceberg;
+      INSERT INTO cov_ib_md_snf VALUES (1);
+    query_sql: |
+      SELECT * FROM cov_ib_md_snf.snapshots;
+    teardown_sql: |
+      DROP TABLE cov_ib_md_snf;
+    notes: "Full snapshot row (with manifest_list, summary, etc.) likely falls back."
+
+  - id: iceberg-metadata-files
+    feature: iceberg-read-metadata
+    operation: select-files
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_md_f (id INT) USING iceberg;
+      INSERT INTO cov_ib_md_f VALUES (1);
+    query_sql: |
+      SELECT * FROM cov_ib_md_f.files;
+    teardown_sql: |
+      DROP TABLE cov_ib_md_f;
+
+  - id: iceberg-metadata-data-files
+    feature: iceberg-read-metadata
+    operation: select-data-files
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_md_df (id INT) USING iceberg;
+      INSERT INTO cov_ib_md_df VALUES (1);
+    query_sql: |
+      SELECT * FROM cov_ib_md_df.data_files;
+    teardown_sql: |
+      DROP TABLE cov_ib_md_df;
+
+  - id: iceberg-metadata-manifests
+    feature: iceberg-read-metadata
+    operation: select-manifests
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_md_m (id INT) USING iceberg;
+      INSERT INTO cov_ib_md_m VALUES (1);
+    query_sql: |
+      SELECT path, length, partition_spec_id FROM cov_ib_md_m.manifests;
+    teardown_sql: |
+      DROP TABLE cov_ib_md_m;
+
+  - id: iceberg-metadata-history
+    feature: iceberg-read-metadata
+    operation: select-history
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_md_h (id INT) USING iceberg;
+      INSERT INTO cov_ib_md_h VALUES (1);
+      INSERT INTO cov_ib_md_h VALUES (2);
+    query_sql: |
+      SELECT snapshot_id FROM cov_ib_md_h.history;
+    teardown_sql: |
+      DROP TABLE cov_ib_md_h;
+
+  - id: iceberg-metadata-partitions
+    feature: iceberg-read-metadata
+    operation: select-partitions
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_md_pt (id INT, p STRING) USING iceberg PARTITIONED BY (p);
+      INSERT INTO cov_ib_md_pt VALUES (1, 'a'), (2, 'b');
+    query_sql: |
+      SELECT * FROM cov_ib_md_pt.partitions;
+    teardown_sql: |
+      DROP TABLE cov_ib_md_pt;
+
+  - id: iceberg-metadata-all-data-files
+    feature: iceberg-read-metadata
+    operation: select-all-data-files
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_md_adf (id INT) USING iceberg;
+      INSERT INTO cov_ib_md_adf VALUES (1);
+    query_sql: |
+      SELECT * FROM cov_ib_md_adf.all_data_files;
+    teardown_sql: |
+      DROP TABLE cov_ib_md_adf;
+
+  - id: iceberg-metadata-all-manifests
+    feature: iceberg-read-metadata
+    operation: select-all-manifests
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_md_am (id INT) USING iceberg;
+      INSERT INTO cov_ib_md_am VALUES (1);
+    query_sql: |
+      SELECT path FROM cov_ib_md_am.all_manifests;
+    teardown_sql: |
+      DROP TABLE cov_ib_md_am;
+
+  - id: iceberg-metadata-refs
+    feature: iceberg-read-metadata
+    operation: select-refs
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_md_rf (id INT) USING iceberg;
+      INSERT INTO cov_ib_md_rf VALUES (1);
+    query_sql: |
+      SELECT * FROM cov_ib_md_rf.refs;
+    teardown_sql: |
+      DROP TABLE cov_ib_md_rf;
+
+  - id: iceberg-metadata-position-deletes
+    feature: iceberg-read-metadata
+    operation: select-position-deletes
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_md_pd (id INT) USING iceberg TBLPROPERTIES (
+        'format-version' = '2',
+        'write.delete.mode' = 'merge-on-read');
+      INSERT INTO cov_ib_md_pd VALUES (1), (2);
+      DELETE FROM cov_ib_md_pd WHERE id = 1;
+    query_sql: |
+      SELECT * FROM cov_ib_md_pd.position_deletes;
+    teardown_sql: |
+      DROP TABLE cov_ib_md_pd;
+
+# ============================================================================
+# Iceberg type coverage
+# ============================================================================
+
+  - id: iceberg-type-bigint
+    feature: iceberg-types
+    operation: select-bigint
+    dtype: bigint
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_bi (id BIGINT) USING iceberg;
+      INSERT INTO cov_ib_t_bi VALUES (10000000000), (20000000000);
+    query_sql: |
+      SELECT id FROM cov_ib_t_bi WHERE id > 15000000000;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_bi;
+
+  - id: iceberg-type-double
+    feature: iceberg-types
+    operation: select-double
+    dtype: double
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_dbl (id INT, v DOUBLE) USING iceberg;
+      INSERT INTO cov_ib_t_dbl VALUES (1, 1.5), (2, 2.71828);
+    query_sql: |
+      SELECT id, v FROM cov_ib_t_dbl WHERE v > 2.0;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_dbl;
+
+  - id: iceberg-type-float
+    feature: iceberg-types
+    operation: select-float
+    dtype: float
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_fl (id INT, v FLOAT) USING iceberg;
+      INSERT INTO cov_ib_t_fl VALUES (1, CAST(1.5 AS FLOAT)), (2, CAST(2.5 AS FLOAT));
+    query_sql: |
+      SELECT id, v FROM cov_ib_t_fl WHERE v > 2.0;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_fl;
+
+  - id: iceberg-type-decimal-small
+    feature: iceberg-types
+    operation: select-decimal-small
+    dtype: decimal(10,2)
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_dcs (id INT, amt DECIMAL(10,2)) USING iceberg;
+      INSERT INTO cov_ib_t_dcs VALUES (1, 12.34), (2, 567.89);
+    query_sql: |
+      SELECT id, amt FROM cov_ib_t_dcs WHERE amt > 10.00;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_dcs;
+
+  - id: iceberg-type-decimal-large
+    feature: iceberg-types
+    operation: select-decimal-large
+    dtype: decimal(38,18)
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_dcl (id INT, amt DECIMAL(38,18)) USING iceberg;
+      INSERT INTO cov_ib_t_dcl VALUES (1, 1234567890.123456789012345678);
+    query_sql: |
+      SELECT id, amt FROM cov_ib_t_dcl;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_dcl;
+
+  - id: iceberg-type-date
+    feature: iceberg-types
+    operation: select-date
+    dtype: date
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_d (id INT, dt DATE) USING iceberg;
+      INSERT INTO cov_ib_t_d VALUES (1, DATE '2024-01-01'), (2, DATE '2024-06-15');
+    query_sql: |
+      SELECT id, dt FROM cov_ib_t_d WHERE dt > DATE '2024-03-01';
+    teardown_sql: |
+      DROP TABLE cov_ib_t_d;
+
+  - id: iceberg-type-timestamp
+    feature: iceberg-types
+    operation: select-timestamp
+    dtype: timestamp
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_ts (id INT, ts TIMESTAMP) USING iceberg;
+      INSERT INTO cov_ib_t_ts VALUES (1, TIMESTAMP '2024-01-01 12:00:00');
+    query_sql: |
+      SELECT id, ts FROM cov_ib_t_ts;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_ts;
+
+  - id: iceberg-type-timestamptz
+    feature: iceberg-types
+    operation: select-timestamptz
+    dtype: timestamptz
+    expected: partial
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_t_tstz (id INT, ts TIMESTAMP) USING iceberg
+        TBLPROPERTIES ('write.parquet.timestamp.use-int96' = 'false');
+      INSERT INTO cov_ib_t_tstz VALUES (1, TIMESTAMP '2024-01-01 12:00:00');
+    query_sql: |
+      SELECT id, ts FROM cov_ib_t_tstz;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_tstz;
+    notes: "timestamptz has known issues per VeloxIceberg.md (Parquet partial, ORC throws)."
+
+  - id: iceberg-type-binary
+    feature: iceberg-types
+    operation: select-binary
+    dtype: binary
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_bin (id INT, payload BINARY) USING iceberg;
+      INSERT INTO cov_ib_t_bin VALUES (1, X'48656c6c6f'), (2, X'576f726c64');
+    query_sql: |
+      SELECT id, length(payload) FROM cov_ib_t_bin;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_bin;
+
+  - id: iceberg-type-fixed
+    feature: iceberg-types
+    operation: select-fixed
+    dtype: fixed
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_t_fx (id INT, payload BINARY) USING iceberg;
+      INSERT INTO cov_ib_t_fx VALUES (1, X'01020304'), (2, X'05060708');
+    query_sql: |
+      SELECT id, payload FROM cov_ib_t_fx;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_fx;
+    notes: "Iceberg FIXED type maps to Spark BINARY but with metadata; per upstream falls back."
+
+  - id: iceberg-type-uuid
+    feature: iceberg-types
+    operation: select-uuid
+    dtype: uuid
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_t_uu (id INT, u STRING) USING iceberg;
+      INSERT INTO cov_ib_t_uu VALUES (1, '550e8400-e29b-41d4-a716-446655440000');
+    query_sql: |
+      SELECT id, u FROM cov_ib_t_uu;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_uu;
+    notes: "UUID type fallback per VeloxIceberg.md DataType row.";
+
+  - id: iceberg-type-boolean
+    feature: iceberg-types
+    operation: select-boolean
+    dtype: boolean
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_b (id INT, flag BOOLEAN) USING iceberg;
+      INSERT INTO cov_ib_t_b VALUES (1, true), (2, false);
+    query_sql: |
+      SELECT id FROM cov_ib_t_b WHERE flag;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_b;
+
+  - id: iceberg-type-struct
+    feature: iceberg-types
+    operation: select-struct
+    dtype: struct
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_st (id INT, info STRUCT<name:STRING, age:INT>) USING iceberg;
+      INSERT INTO cov_ib_t_st VALUES (1, named_struct('name','alice','age',30));
+    query_sql: |
+      SELECT id, info.name, info.age FROM cov_ib_t_st;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_st;
+
+  - id: iceberg-type-array
+    feature: iceberg-types
+    operation: select-array
+    dtype: array<int>
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_arr (id INT, tags ARRAY<INT>) USING iceberg;
+      INSERT INTO cov_ib_t_arr VALUES (1, array(1,2,3)), (2, array(4,5));
+    query_sql: |
+      SELECT id, tags[0], size(tags) FROM cov_ib_t_arr;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_arr;
+
+  - id: iceberg-type-map
+    feature: iceberg-types
+    operation: select-map
+    dtype: map<string,int>
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_mp (id INT, props MAP<STRING, INT>) USING iceberg;
+      INSERT INTO cov_ib_t_mp VALUES (1, map('a', 1, 'b', 2));
+    query_sql: |
+      SELECT id, props['a'] FROM cov_ib_t_mp;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_mp;
+
+  - id: iceberg-type-tinyint
+    feature: iceberg-types
+    operation: select-tinyint
+    dtype: tinyint
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_t_ti (id INT, v TINYINT) USING iceberg;
+      INSERT INTO cov_ib_t_ti VALUES (1, CAST(10 AS TINYINT)), (2, CAST(20 AS TINYINT));
+    query_sql: |
+      SELECT id, v FROM cov_ib_t_ti WHERE v > 15;
+    teardown_sql: |
+      DROP TABLE cov_ib_t_ti;
+    notes: "Iceberg has no TINYINT type natively; maps to INT internally."
+
+  - id: iceberg-type-deep-nested
+    feature: iceberg-types
+    operation: deep-nested
+    dtype: struct<array<struct>>
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_dn (
+        id INT,
+        rec STRUCT<addresses: ARRAY<STRUCT<city:STRING, zip:INT>>>
+      ) USING iceberg;
+      INSERT INTO cov_ib_dn VALUES
+        (1, named_struct('addresses', array(named_struct('city','sea','zip',98101))));
+    query_sql: |
+      SELECT id, rec.addresses[0].city FROM cov_ib_dn;
+    teardown_sql: |
+      DROP TABLE cov_ib_dn;
+
+# ============================================================================
+# Iceberg schema evolution
+# ============================================================================
+
+  - id: iceberg-schema-evo-add-then-read
+    feature: iceberg-schema-evolution
+    operation: add-column-then-read
+    dtype: int
+    expected: native
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_se_ar (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_se_ar VALUES (1, 'a');
+      ALTER TABLE cov_ib_se_ar ADD COLUMNS (newcol INT);
+    query_sql: |
+      SELECT id, v, newcol FROM cov_ib_se_ar;
+    teardown_sql: |
+      DROP TABLE cov_ib_se_ar;
+
+  - id: iceberg-schema-evo-rename-then-read
+    feature: iceberg-schema-evolution
+    operation: rename-column-then-read
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_se_rr (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_se_rr VALUES (1, 'a');
+      ALTER TABLE cov_ib_se_rr RENAME COLUMN v TO val;
+    query_sql: |
+      SELECT id, val FROM cov_ib_se_rr;
+    teardown_sql: |
+      DROP TABLE cov_ib_se_rr;
+    notes: "hasRenamedColumn check in IcebergScanTransformer triggers fallback."
+
+  - id: iceberg-schema-evo-drop-then-read
+    feature: iceberg-schema-evolution
+    operation: drop-column-then-read
+    dtype: int
+    expected: native
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_se_dr (id INT, v STRING, w STRING) USING iceberg;
+      INSERT INTO cov_ib_se_dr VALUES (1, 'a', 'x'), (2, 'b', 'y');
+      ALTER TABLE cov_ib_se_dr DROP COLUMN w;
+    query_sql: |
+      SELECT id, v FROM cov_ib_se_dr;
+    teardown_sql: |
+      DROP TABLE cov_ib_se_dr;
+
+  - id: iceberg-schema-evo-reorder
+    feature: iceberg-schema-evolution
+    operation: reorder-column
+    dtype: mixed
+    expected: native
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_se_re (id INT, v STRING, w INT) USING iceberg;
+      INSERT INTO cov_ib_se_re VALUES (1, 'a', 100);
+      ALTER TABLE cov_ib_se_re ALTER COLUMN w FIRST;
+    query_sql: |
+      SELECT * FROM cov_ib_se_re;
+    teardown_sql: |
+      DROP TABLE cov_ib_se_re;
+
+  - id: iceberg-schema-evo-type-promotion
+    feature: iceberg-schema-evolution
+    operation: type-promotion
+    dtype: int-to-bigint
+    expected: native
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_se_tp (id INT, v INT) USING iceberg;
+      INSERT INTO cov_ib_se_tp VALUES (1, 100);
+      ALTER TABLE cov_ib_se_tp ALTER COLUMN v TYPE BIGINT;
+      INSERT INTO cov_ib_se_tp VALUES (2, 10000000000);
+    query_sql: |
+      SELECT id, v FROM cov_ib_se_tp;
+    teardown_sql: |
+      DROP TABLE cov_ib_se_tp;
+
+  - id: iceberg-schema-evo-add-partition
+    feature: iceberg-schema-evolution
+    operation: add-partition-spec
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_se_ap (id INT, region STRING) USING iceberg;
+      INSERT INTO cov_ib_se_ap VALUES (1, 'east'), (2, 'west');
+    query_sql: |
+      ALTER TABLE cov_ib_se_ap ADD PARTITION FIELD region;
+    teardown_sql: |
+      DROP TABLE cov_ib_se_ap;
+
+  - id: iceberg-schema-evo-drop-partition
+    feature: iceberg-schema-evolution
+    operation: drop-partition-spec
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_se_dp (id INT, region STRING) USING iceberg PARTITIONED BY (region);
+      INSERT INTO cov_ib_se_dp VALUES (1, 'east');
+    query_sql: |
+      ALTER TABLE cov_ib_se_dp DROP PARTITION FIELD region;
+    teardown_sql: |
+      DROP TABLE cov_ib_se_dp;
+
+  - id: iceberg-schema-evo-replace-partition
+    feature: iceberg-schema-evolution
+    operation: replace-partition-spec
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_se_rp (id INT, region STRING) USING iceberg PARTITIONED BY (region);
+      INSERT INTO cov_ib_se_rp VALUES (1, 'east');
+    query_sql: |
+      ALTER TABLE cov_ib_se_rp REPLACE PARTITION FIELD region WITH bucket(8, id);
+    teardown_sql: |
+      DROP TABLE cov_ib_se_rp;
+
+# ============================================================================
+# Iceberg formats (parquet / orc / avro)
+# ============================================================================
+
+  - id: iceberg-format-parquet
+    feature: iceberg-format
+    operation: parquet-default
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_fmt_pq (id INT) USING iceberg
+        TBLPROPERTIES ('write.format.default' = 'parquet');
+      INSERT INTO cov_ib_fmt_pq VALUES (1), (2), (3);
+    query_sql: |
+      SELECT id FROM cov_ib_fmt_pq WHERE id > 1;
+    teardown_sql: |
+      DROP TABLE cov_ib_fmt_pq;
+
+  - id: iceberg-format-orc
+    feature: iceberg-format
+    operation: orc-default
+    dtype: int
+    expected: partial
+    upstream_claim: partial
+    setup_sql: |
+      CREATE TABLE cov_ib_fmt_orc (id INT) USING iceberg
+        TBLPROPERTIES ('write.format.default' = 'orc');
+      INSERT INTO cov_ib_fmt_orc VALUES (1), (2), (3);
+    query_sql: |
+      SELECT id FROM cov_ib_fmt_orc WHERE id > 1;
+    teardown_sql: |
+      DROP TABLE cov_ib_fmt_orc;
+    notes: "ORC partial offload per upstream; some types throw."
+
+  - id: iceberg-format-avro
+    feature: iceberg-format
+    operation: avro-default
+    dtype: int
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_fmt_av (id INT) USING iceberg
+        TBLPROPERTIES ('write.format.default' = 'avro');
+      INSERT INTO cov_ib_fmt_av VALUES (1), (2);
+    query_sql: |
+      SELECT id FROM cov_ib_fmt_av;
+    teardown_sql: |
+      DROP TABLE cov_ib_fmt_av;
+    notes: "Avro format unsupported per VeloxIceberg.md.";
+
+  - id: iceberg-format-parquet-zstd
+    feature: iceberg-format
+    operation: parquet-zstd
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_fmt_zstd (id INT) USING iceberg TBLPROPERTIES (
+        'write.format.default' = 'parquet',
+        'write.parquet.compression-codec' = 'zstd');
+      INSERT INTO cov_ib_fmt_zstd VALUES (1), (2);
+    query_sql: |
+      SELECT id FROM cov_ib_fmt_zstd;
+    teardown_sql: |
+      DROP TABLE cov_ib_fmt_zstd;
+
+  - id: iceberg-format-parquet-snappy
+    feature: iceberg-format
+    operation: parquet-snappy
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_fmt_sn (id INT) USING iceberg TBLPROPERTIES (
+        'write.format.default' = 'parquet',
+        'write.parquet.compression-codec' = 'snappy');
+      INSERT INTO cov_ib_fmt_sn VALUES (1), (2);
+    query_sql: |
+      SELECT id FROM cov_ib_fmt_sn;
+    teardown_sql: |
+      DROP TABLE cov_ib_fmt_sn;
+
+# ============================================================================
+# Iceberg table-feature variants
+# ============================================================================
+
+  - id: iceberg-format-version-1
+    feature: iceberg-types
+    operation: format-version-1
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_v1 (id INT, v STRING) USING iceberg
+        TBLPROPERTIES ('format-version' = '1');
+      INSERT INTO cov_ib_v1 VALUES (1, 'a'), (2, 'b');
+    query_sql: |
+      SELECT id, v FROM cov_ib_v1;
+    teardown_sql: |
+      DROP TABLE cov_ib_v1;
+
+  - id: iceberg-format-version-2
+    feature: iceberg-types
+    operation: format-version-2
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_v2 (id INT, v STRING) USING iceberg
+        TBLPROPERTIES ('format-version' = '2');
+      INSERT INTO cov_ib_v2 VALUES (1, 'a'), (2, 'b');
+    query_sql: |
+      SELECT id, v FROM cov_ib_v2;
+    teardown_sql: |
+      DROP TABLE cov_ib_v2;
+
+  - id: iceberg-format-version-3
+    feature: iceberg-types
+    operation: format-version-3
+    dtype: int
+    expected: unknown
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_v3 (id INT, v STRING) USING iceberg
+        TBLPROPERTIES ('format-version' = '3');
+      INSERT INTO cov_ib_v3 VALUES (1, 'a'), (2, 'b');
+    query_sql: |
+      SELECT id, v FROM cov_ib_v3;
+    teardown_sql: |
+      DROP TABLE cov_ib_v3;
+    notes: "V3 features (geometry, variant, row lineage) untested under Gluten."
+
+  - id: iceberg-feature-row-lineage
+    feature: iceberg-types
+    operation: read-row-lineage
+    dtype: n/a
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_rl (id INT, v STRING) USING iceberg
+        TBLPROPERTIES ('format-version' = '3');
+      INSERT INTO cov_ib_rl VALUES (1, 'a');
+    query_sql: |
+      SELECT id, v, _row_id, _last_updated_sequence_number FROM cov_ib_rl;
+    teardown_sql: |
+      DROP TABLE cov_ib_rl;
+    notes: "V3 row lineage; metadata columns untested.";
+
+  - id: iceberg-feature-default-value
+    feature: iceberg-types
+    operation: column-with-default
+    dtype: int
+    expected: fallback
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_cdf (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_cdf VALUES (1, 'a');
+      ALTER TABLE cov_ib_cdf ADD COLUMN d STRING DEFAULT 'unknown';
+    query_sql: |
+      SELECT id, v, d FROM cov_ib_cdf;
+    teardown_sql: |
+      DROP TABLE cov_ib_cdf;
+
+  - id: iceberg-feature-identifier-fields
+    feature: iceberg-types
+    operation: identifier-fields
+    dtype: n/a
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_idf (id INT NOT NULL, v STRING) USING iceberg;
+      ALTER TABLE cov_ib_idf SET IDENTIFIER FIELDS id;
+      INSERT INTO cov_ib_idf VALUES (1, 'a'), (2, 'b');
+    query_sql: |
+      SELECT id, v FROM cov_ib_idf;
+    teardown_sql: |
+      DROP TABLE cov_ib_idf;
+
+# ============================================================================
+# Iceberg cast + null + conditional expressions
+# ============================================================================
+
+  - id: iceberg-read-cast-string-int
+    feature: iceberg-read
+    operation: cast-string-to-int
+    dtype: string-to-int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_cs (id INT, s STRING) USING iceberg;
+      INSERT INTO cov_ib_cs VALUES (1, '100'), (2, '200');
+    query_sql: |
+      SELECT id, CAST(s AS INT) FROM cov_ib_cs;
+    teardown_sql: |
+      DROP TABLE cov_ib_cs;
+
+  - id: iceberg-read-cast-string-date
+    feature: iceberg-read
+    operation: cast-string-to-date
+    dtype: string-to-date
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_csd (id INT, s STRING) USING iceberg;
+      INSERT INTO cov_ib_csd VALUES (1, '2024-01-01'), (2, '2024-06-15');
+    query_sql: |
+      SELECT id, CAST(s AS DATE) FROM cov_ib_csd;
+    teardown_sql: |
+      DROP TABLE cov_ib_csd;
+
+  - id: iceberg-read-is-null
+    feature: iceberg-read
+    operation: is-null
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_isn (id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_isn VALUES (1, 'a'), (2, NULL), (3, 'c');
+    query_sql: |
+      SELECT id FROM cov_ib_isn WHERE v IS NULL;
+    teardown_sql: |
+      DROP TABLE cov_ib_isn;
+
+  - id: iceberg-read-case-when
+    feature: iceberg-read
+    operation: case-when
+    dtype: mixed
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_cw (id INT, score INT) USING iceberg;
+      INSERT INTO cov_ib_cw VALUES (1, 95), (2, 70), (3, 50);
+    query_sql: |
+      SELECT id,
+        CASE WHEN score >= 90 THEN 'A' WHEN score >= 70 THEN 'B' ELSE 'C' END AS grade
+      FROM cov_ib_cw;
+    teardown_sql: |
+      DROP TABLE cov_ib_cw;
+
+  - id: iceberg-read-coalesce
+    feature: iceberg-read
+    operation: coalesce
+    dtype: string
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_co (id INT, a STRING, b STRING) USING iceberg;
+      INSERT INTO cov_ib_co VALUES (1, NULL, 'beta'), (2, 'alpha', NULL);
+    query_sql: |
+      SELECT id, COALESCE(a, b) FROM cov_ib_co;
+    teardown_sql: |
+      DROP TABLE cov_ib_co;
+
+  - id: iceberg-read-string-functions
+    feature: iceberg-read
+    operation: string-functions
+    dtype: string
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_sf (id INT, s STRING) USING iceberg;
+      INSERT INTO cov_ib_sf VALUES (1, 'Hello'), (2, '  trim  ');
+    query_sql: |
+      SELECT id, upper(s), length(trim(s)) FROM cov_ib_sf;
+    teardown_sql: |
+      DROP TABLE cov_ib_sf;
+
+  - id: iceberg-read-math-functions
+    feature: iceberg-read
+    operation: math-functions
+    dtype: double
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_mf (id INT, v DOUBLE) USING iceberg;
+      INSERT INTO cov_ib_mf VALUES (1, 16.0), (2, 100.0);
+    query_sql: |
+      SELECT id, sqrt(v), abs(v - 50), round(v, 1) FROM cov_ib_mf;
+    teardown_sql: |
+      DROP TABLE cov_ib_mf;
+
+  - id: iceberg-read-date-functions
+    feature: iceberg-read
+    operation: date-functions
+    dtype: date
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_df (id INT, dt DATE) USING iceberg;
+      INSERT INTO cov_ib_df VALUES (1, DATE '2024-03-15');
+    query_sql: |
+      SELECT id, year(dt), month(dt), day(dt), date_add(dt, 7) FROM cov_ib_df;
+    teardown_sql: |
+      DROP TABLE cov_ib_df;
+
+# ============================================================================
+# Iceberg DESCRIBE / SHOW / DDL minor
+# ============================================================================
+
+  - id: iceberg-read-describe-table
+    feature: iceberg-read-metadata
+    operation: describe-table
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_dt (id INT, v STRING) USING iceberg;
+    query_sql: |
+      DESCRIBE TABLE cov_ib_dt;
+    teardown_sql: |
+      DROP TABLE cov_ib_dt;
+
+  - id: iceberg-read-describe-extended
+    feature: iceberg-read-metadata
+    operation: describe-extended
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_de (id INT) USING iceberg;
+    query_sql: |
+      DESCRIBE EXTENDED cov_ib_de;
+    teardown_sql: |
+      DROP TABLE cov_ib_de;
+
+  - id: iceberg-read-show-tblproperties
+    feature: iceberg-read-metadata
+    operation: show-tblproperties
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_stp2 (id INT) USING iceberg
+        TBLPROPERTIES ('comment' = 'a test table');
+    query_sql: |
+      SHOW TBLPROPERTIES cov_ib_stp2;
+    teardown_sql: |
+      DROP TABLE cov_ib_stp2;
+
+  - id: iceberg-read-show-create-table
+    feature: iceberg-read-metadata
+    operation: show-create-table
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_sct (id INT) USING iceberg;
+    query_sql: |
+      SHOW CREATE TABLE cov_ib_sct;
+    teardown_sql: |
+      DROP TABLE cov_ib_sct;
+
+  - id: iceberg-read-show-partitions
+    feature: iceberg-read-metadata
+    operation: show-partitions
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_sp (id INT, p STRING) USING iceberg PARTITIONED BY (p);
+      INSERT INTO cov_ib_sp VALUES (1, 'a'), (2, 'b');
+    query_sql: |
+      SHOW PARTITIONS cov_ib_sp;
+    teardown_sql: |
+      DROP TABLE cov_ib_sp;
+
+  - id: iceberg-write-create-table-like
+    feature: iceberg-write
+    operation: create-table-like
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_ctl_src (id INT, v STRING) USING iceberg;
+    query_sql: |
+      CREATE TABLE cov_ib_ctl_dst LIKE cov_ib_ctl_src USING iceberg;
+    teardown_sql: |
+      DROP TABLE cov_ib_ctl_dst;
+      DROP TABLE cov_ib_ctl_src;
+
+  - id: iceberg-write-truncate
+    feature: iceberg-write
+    operation: truncate-table
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_tr (id INT) USING iceberg;
+      INSERT INTO cov_ib_tr VALUES (1), (2);
+    query_sql: |
+      TRUNCATE TABLE cov_ib_tr;
+    teardown_sql: |
+      DROP TABLE cov_ib_tr;
+
+  - id: iceberg-write-comment-on
+    feature: iceberg-maintenance
+    operation: comment-on-table
+    dtype: n/a
+    expected: fallback
+    upstream_claim: fallback
+    setup_sql: |
+      CREATE TABLE cov_ib_co2 (id INT) USING iceberg;
+    query_sql: |
+      COMMENT ON TABLE cov_ib_co2 IS 'coverage tool test';
+    teardown_sql: |
+      DROP TABLE cov_ib_co2;
+
+# ============================================================================
+# Defensive: verify uncommon read paths
+# ============================================================================
+
+  - id: iceberg-read-not-in-subquery
+    feature: iceberg-read
+    operation: not-in-subquery
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_nin_t (id INT) USING iceberg;
+      INSERT INTO cov_ib_nin_t VALUES (1), (2), (3), (4);
+      CREATE TABLE cov_ib_nin_f (id INT) USING iceberg;
+      INSERT INTO cov_ib_nin_f VALUES (2);
+    query_sql: |
+      SELECT id FROM cov_ib_nin_t WHERE id NOT IN (SELECT id FROM cov_ib_nin_f WHERE id IS NOT NULL);
+    teardown_sql: |
+      DROP TABLE cov_ib_nin_t;
+      DROP TABLE cov_ib_nin_f;
+
+  - id: iceberg-read-scalar-subquery
+    feature: iceberg-read
+    operation: scalar-subquery
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_ss (id INT, v INT) USING iceberg;
+      INSERT INTO cov_ib_ss VALUES (1, 100), (2, 200);
+    query_sql: |
+      SELECT id, v, (SELECT max(v) FROM cov_ib_ss) AS mx FROM cov_ib_ss;
+    teardown_sql: |
+      DROP TABLE cov_ib_ss;
+
+  - id: iceberg-read-intersect
+    feature: iceberg-read
+    operation: intersect
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_int_a (id INT) USING iceberg;
+      INSERT INTO cov_ib_int_a VALUES (1), (2), (3);
+      CREATE TABLE cov_ib_int_b (id INT) USING iceberg;
+      INSERT INTO cov_ib_int_b VALUES (2), (3), (4);
+    query_sql: |
+      SELECT id FROM cov_ib_int_a INTERSECT SELECT id FROM cov_ib_int_b;
+    teardown_sql: |
+      DROP TABLE cov_ib_int_a;
+      DROP TABLE cov_ib_int_b;
+
+  - id: iceberg-read-except
+    feature: iceberg-read
+    operation: except
+    dtype: int
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_exc_a (id INT) USING iceberg;
+      INSERT INTO cov_ib_exc_a VALUES (1), (2), (3);
+      CREATE TABLE cov_ib_exc_b (id INT) USING iceberg;
+      INSERT INTO cov_ib_exc_b VALUES (2);
+    query_sql: |
+      SELECT id FROM cov_ib_exc_a EXCEPT SELECT id FROM cov_ib_exc_b;
+    teardown_sql: |
+      DROP TABLE cov_ib_exc_a;
+      DROP TABLE cov_ib_exc_b;
+
+  - id: iceberg-read-grouping-sets
+    feature: iceberg-read
+    operation: grouping-sets
+    dtype: mixed
+    expected: native
+    upstream_claim: not-tested
+    setup_sql: |
+      CREATE TABLE cov_ib_gs (region STRING, product STRING, sales INT) USING iceberg;
+      INSERT INTO cov_ib_gs VALUES ('east','a',10), ('east','b',20), ('west','a',30);
+    query_sql: |
+      SELECT region, product, sum(sales) FROM cov_ib_gs
+      GROUP BY GROUPING SETS ((region), (product));
+    teardown_sql: |
+      DROP TABLE cov_ib_gs;
+
+  - id: iceberg-read-self-join
+    feature: iceberg-read
+    operation: join-self
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_sj (id INT, parent_id INT, v STRING) USING iceberg;
+      INSERT INTO cov_ib_sj VALUES (1, NULL, 'root'), (2, 1, 'a'), (3, 1, 'b');
+    query_sql: |
+      SELECT child.id, child.v, parent.v
+      FROM cov_ib_sj child LEFT JOIN cov_ib_sj parent ON child.parent_id = parent.id;
+    teardown_sql: |
+      DROP TABLE cov_ib_sj;
+
+  - id: iceberg-read-explode-array
+    feature: iceberg-read
+    operation: explode-array
+    dtype: array<int>
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_exp (id INT, tags ARRAY<INT>) USING iceberg;
+      INSERT INTO cov_ib_exp VALUES (1, array(10, 20)), (2, array(30, 40, 50));
+    query_sql: |
+      SELECT id, tag FROM cov_ib_exp LATERAL VIEW explode(tags) AS tag;
+    teardown_sql: |
+      DROP TABLE cov_ib_exp;
+
+  - id: iceberg-read-window-running-sum
+    feature: iceberg-read
+    operation: window-running-sum
+    dtype: int
+    expected: native
+    upstream_claim: yes
+    setup_sql: |
+      CREATE TABLE cov_ib_rs (k STRING, ts INT, v INT) USING iceberg;
+      INSERT INTO cov_ib_rs VALUES ('a', 1, 10), ('a', 2, 20), ('a', 3, 30);
+    query_sql: |
+      SELECT k, ts, v,
+        sum(v) OVER (PARTITION BY k ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+      FROM cov_ib_rs;
+    teardown_sql: |
+      DROP TABLE cov_ib_rs;
