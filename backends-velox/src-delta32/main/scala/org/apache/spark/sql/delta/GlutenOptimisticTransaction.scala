@@ -27,12 +27,11 @@ import org.apache.spark.sql.delta.hooks.AutoCompact
 import org.apache.spark.sql.delta.perf.{DeltaOptimizedWriterExec, GlutenDeltaOptimizedWriterExec}
 import org.apache.spark.sql.delta.schema.InnerInvariantViolationException
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
-import org.apache.spark.sql.delta.stats.{GlutenDeltaIdentityColumnStatsTracker, GlutenDeltaJobStatisticsTracker}
+import org.apache.spark.sql.delta.stats.GlutenDeltaJobStatisticsTracker
 import org.apache.spark.sql.execution.{SparkPlan, SQLExecution}
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
 import org.apache.spark.sql.execution.datasources.{BasicWriteJobStatsTracker, FileFormatWriter, WriteJobStatsTracker}
 import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.util.ScalaExtensions.OptionExt
 import org.apache.spark.util.SerializableConfiguration
 
 import scala.collection.mutable.ListBuffer
@@ -56,11 +55,11 @@ class GlutenOptimisticTransaction(delegate: OptimisticTransaction)
     val (data, partitionSchema) = performCDCPartition(inputData)
     val outputPath = deltaLog.dataPath
 
-    val (queryExecution, output, generatedColumnConstraints, trackFromData) =
+    val (queryExecution, output, generatedColumnConstraints, _trackFromData) =
       normalizeData(deltaLog, writeOptions, data)
-    // Use the track set from the transaction if set,
-    // otherwise use the track set from `normalizeData()`.
-    val trackIdentityHighWaterMarks = trackHighWaterMarks.getOrElse(trackFromData)
+    // Delta 3.2.1: normalizeData returns the trackHighWaterMarks set directly; the Option-wrapped
+    // OptimisticTransaction.trackHighWaterMarks field lands in 3.3. IDENTITY-column tracking is
+    // intentionally dropped on this overlay (see usage strip-out below).
 
     val partitioningColumns = getPartitioningColumns(partitionSchema, output)
 
@@ -78,16 +77,11 @@ class GlutenOptimisticTransaction(delegate: OptimisticTransaction)
     val constraints =
       Constraints.getAll(metadata, spark) ++ generatedColumnConstraints ++ additionalConstraints
 
-    val identityTrackerOpt = IdentityColumn
-      .createIdentityColumnStatsTracker(
-        spark,
-        deltaLog.newDeltaHadoopConf(),
-        outputPath,
-        metadata.schema,
-        statsDataSchema,
-        trackIdentityHighWaterMarks
-      )
-      .map(new GlutenDeltaIdentityColumnStatsTracker(_))
+    // IDENTITY-column high-water-mark tracking is not wired on the Delta 3.2.1 overlay
+    // (IdentityColumn.createIdentityColumnStatsTracker, DeltaIdentityColumnStatsTracker,
+    // OptimisticTransaction.updatedIdentityHighWaterMarks all land in 3.3). Tables that
+    // use IDENTITY columns through this code path will not advance high-water marks on
+    // Gluten-driven writes.
 
     SQLExecution.withNewExecutionId(queryExecution, Option("deltaTransactionalWrite")) {
       val outputSpec = FileFormatWriter.OutputSpec(outputPath.toString, Map.empty, output)
@@ -183,9 +177,7 @@ class GlutenOptimisticTransaction(delegate: OptimisticTransaction)
           // scalastyle:on deltahadoopconfiguration
           partitionColumns = partitioningColumns,
           bucketSpec = None,
-          statsTrackers = optionalStatsTracker.toSeq
-            ++ statsTrackers
-            ++ identityTrackerOpt.toSeq,
+          statsTrackers = optionalStatsTracker.toSeq ++ statsTrackers,
           options = options
         )
       } catch {
@@ -193,12 +185,7 @@ class GlutenOptimisticTransaction(delegate: OptimisticTransaction)
           // Pull an InvariantViolationException up to the top level if it was the root cause.
           throw violationException
       }
-      statsTrackers.foreach {
-        case tracker: BasicWriteJobStatsTracker =>
-          val numOutputRowsOpt = tracker.driverSideMetrics.get("numOutputRows").map(_.value)
-          IdentityColumn.logTableWrite(snapshot, trackIdentityHighWaterMarks, numOutputRowsOpt)
-        case _ => ()
-      }
+      // IdentityColumn.logTableWrite is 3.3+; no-op on the 3.2.1 overlay.
     }
 
     var resultFiles =
@@ -233,10 +220,7 @@ class GlutenOptimisticTransaction(delegate: OptimisticTransaction)
     }
 
     if (resultFiles.nonEmpty && !isOptimize) registerPostCommitHook(AutoCompact)
-    // Record the updated high water marks to be used during transaction commit.
-    identityTrackerOpt.ifDefined {
-      tracker => updatedIdentityHighWaterMarks.appendAll(tracker.delegate.highWaterMarks.toSeq)
-    }
+    // OptimisticTransaction.updatedIdentityHighWaterMarks is 3.3+; nothing to record on 3.2.1.
 
     resultFiles.toSeq ++ committer.changeFiles
   }

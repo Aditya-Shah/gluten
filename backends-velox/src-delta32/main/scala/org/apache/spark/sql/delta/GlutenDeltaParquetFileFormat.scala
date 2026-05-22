@@ -16,14 +16,13 @@
  */
 package org.apache.spark.sql.delta
 
-import org.apache.spark.internal.{LoggingShims, MDC}
+import org.apache.spark.internal.LoggingShims
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.delta.GlutenDeltaParquetFileFormat._
 import org.apache.spark.sql.delta.actions.{DeletionVectorDescriptor, Metadata, Protocol}
 import org.apache.spark.sql.delta.commands.DeletionVectorUtils.deletionVectorsReadable
 import org.apache.spark.sql.delta.deletionvectors.{DropMarkedRowsFilter, KeepAllRowsFilter, KeepMarkedRowsFilter}
-import org.apache.spark.sql.delta.logging.DeltaLogKeys
 import org.apache.spark.sql.delta.schema.SchemaMergingUtils
 import org.apache.spark.sql.delta.sources.DeltaSQLConf
 import org.apache.spark.sql.execution.datasources.OutputWriterFactory
@@ -73,8 +72,9 @@ case class GlutenDeltaParquetFileFormat(
     }
   }
 
-  SparkSession.getActiveSession.ifDefined { session =>
-    TypeWidening.assertTableReadable(session.sessionState.conf, protocol, metadata)
+  SparkSession.getActiveSession.ifDefined { _ =>
+    // Delta 3.2.1: assertTableReadable is (protocol, metadata); the conf-aware variant lands in 3.3.
+    TypeWidening.assertTableReadable(protocol, metadata)
   }
 
 
@@ -347,8 +347,10 @@ case class GlutenDeltaParquetFileFormat(
           case unexpectedFilterType => throw new IllegalStateException(
             s"Unexpected row index filter type: ${unexpectedFilterType}")
         }
+        // Delta 3.2.1 serializes the DV descriptor in file metadata as JSON; binary encoding
+        // (deserializeFromBase64) lands in 3.3.
         rowIndexFilter.createInstance(
-          DeletionVectorDescriptor.deserializeFromBase64(dvDescriptorOpt.get.asInstanceOf[String]),
+          DeletionVectorDescriptor.fromJson(dvDescriptorOpt.get.asInstanceOf[String]),
           serializableHadoopConf.value,
           tablePath.map(new Path(_)))
       } else if (dvDescriptorOpt.isDefined || filterTypeOpt.isDefined) {
@@ -523,7 +525,7 @@ case class GlutenDeltaParquetFileFormat(
       case AlwaysTrue() => Some(AlwaysTrue())
       case AlwaysFalse() => Some(AlwaysFalse())
       case _ =>
-        logError(log"Failed to translate filter ${MDC(DeltaLogKeys.FILTER, filter)}")
+        logError(s"Failed to translate filter $filter")
         None
     }
   }

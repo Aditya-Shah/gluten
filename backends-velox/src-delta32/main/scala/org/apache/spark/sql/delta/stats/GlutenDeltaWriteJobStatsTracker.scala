@@ -19,7 +19,6 @@ package org.apache.spark.sql.delta.stats
 import org.apache.gluten.execution.{PlaceholderRow, TerminalRow, VeloxColumnarToRowExec}
 
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.delta.DeltaIdentityColumnStatsTracker
 import org.apache.spark.sql.execution.datasources.{WriteJobStatsTracker, WriteTaskStats, WriteTaskStatsTracker}
 import org.apache.spark.sql.execution.metric.SQLMetric
 
@@ -37,8 +36,8 @@ class GlutenDeltaJobStatisticsTracker(val delegate: DeltaJobStatisticsTracker)
   }
 }
 
-class GlutenDeltaIdentityColumnStatsTracker(override val delegate: DeltaIdentityColumnStatsTracker)
-  extends GlutenDeltaJobStatisticsTracker(delegate)
+// GlutenDeltaIdentityColumnStatsTracker (and the underlying Delta DeltaIdentityColumnStatsTracker)
+// land in Delta 3.3; intentionally omitted on the 3.2.1 overlay.
 
 private object GlutenDeltaJobStatisticsTracker {
 

@@ -24,7 +24,7 @@ import org.apache.gluten.execution.datasource.GlutenFormatFactory
 import org.apache.gluten.extension.columnar.transition.{Convention, Transitions}
 
 import org.apache.spark._
-import org.apache.spark.internal.{LoggingShims, MDC}
+import org.apache.spark.internal.LoggingShims
 import org.apache.spark.internal.io.{FileCommitProtocol, SparkHadoopWriterUtils}
 import org.apache.spark.shuffle.FetchFailedException
 import org.apache.spark.sql.SparkSession
@@ -35,7 +35,6 @@ import org.apache.spark.sql.catalyst.expressions.BindReferences.bindReferences
 import org.apache.spark.sql.catalyst.util.{CaseInsensitiveMap, DateTimeUtils}
 import org.apache.spark.sql.connector.write.WriterCommitMessage
 import org.apache.spark.sql.delta.{DeltaOptions, GlutenParquetFileFormat}
-import org.apache.spark.sql.delta.logging.DeltaLogKeys
 import org.apache.spark.sql.errors.QueryExecutionErrors
 import org.apache.spark.sql.execution._
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanExec
@@ -334,20 +333,18 @@ object GlutenDeltaFileFormatWriter extends LoggingShims {
       val ret = f
       val commitMsgs = ret.map(_.commitMsg)
 
-      logInfo(log"Start to commit write Job ${MDC(DeltaLogKeys.JOB_ID, description.uuid)}.")
+      logInfo(s"Start to commit write Job ${description.uuid}.")
       val (_, duration) = Utils.timeTakenMs { committer.commitJob(job, commitMsgs) }
-      logInfo(log"Write Job ${MDC(DeltaLogKeys.JOB_ID, description.uuid)} committed. " +
-        log"Elapsed time: ${MDC(DeltaLogKeys.DURATION, duration)} ms.")
+      logInfo(s"Write Job ${description.uuid} committed. Elapsed time: ${duration} ms.")
 
       processStats(description.statsTrackers, ret.map(_.summary.stats), duration)
-      logInfo(log"Finished processing stats for write job " +
-        log"${MDC(DeltaLogKeys.JOB_ID, description.uuid)}.")
+      logInfo(s"Finished processing stats for write job ${description.uuid}.")
 
       // return a set of all the partition paths that were updated during this job
       ret.map(_.summary.updatedPartitions).reduceOption(_ ++ _).getOrElse(Set.empty)
     } catch {
       case cause: Throwable =>
-        logError(log"Aborting job ${MDC(DeltaLogKeys.JOB_ID, description.uuid)}", cause)
+        logError(s"Aborting job ${description.uuid}", cause)
         committer.abortJob(job)
         throw cause
     }
@@ -441,11 +438,10 @@ object GlutenDeltaFileFormatWriter extends LoggingShims {
       hadoopConf.setBoolean("mapreduce.task.ismap", true)
       hadoopConf.setInt("mapreduce.task.partition", 0)
 
-      if (partitionColumnToDataType.isEmpty) {
-        new TaskAttemptContextImpl(hadoopConf, taskAttemptId)
-      } else {
-        new DeltaFileFormatWriter.PartitionedTaskAttemptContextImpl(hadoopConf, taskAttemptId, partitionColumnToDataType)
-      }
+      // Delta 3.2.1 lacks DeltaFileFormatWriter.PartitionedTaskAttemptContextImpl (lands in 3.3).
+      // Fall back to the plain context for both branches; partition-column-aware path encoding
+      // under IcebergCompat may differ for date/timestamp partition values.
+      new TaskAttemptContextImpl(hadoopConf, taskAttemptId)
     }
 
     committer.setupTask(taskAttemptContext)
@@ -480,7 +476,7 @@ object GlutenDeltaFileFormatWriter extends LoggingShims {
       })(catchBlock = {
         // If there is an error, abort the task
         dataWriter.abort()
-        logError(log"Job ${MDC(DeltaLogKeys.JOB_ID, jobId)} aborted.")
+        logError(s"Job ${jobId} aborted.")
       }, finallyBlock = {
         dataWriter.close()
       })

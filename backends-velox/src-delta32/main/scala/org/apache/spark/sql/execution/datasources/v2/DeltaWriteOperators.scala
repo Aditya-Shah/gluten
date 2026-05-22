@@ -70,16 +70,11 @@ object DeltaV2WriteOperators {
 
     override def beginDoCommit(): Unit = ()
 
-    override def beginBackfill(): Unit = ()
-
-    override def beginPostCommit(): Unit = ()
-
     override def transactionCommitted(): Unit = ()
 
     override def transactionAborted(): Unit = ()
 
-    override def createChild(): TransactionExecutionObserver = {
-      TransactionExecutionObserver.getObserver
-    }
+    // beginBackfill, beginPostCommit, createChild are added to TransactionExecutionObserver
+    // in Delta 3.3; omitted on the 3.2.1 overlay.
   }
 }

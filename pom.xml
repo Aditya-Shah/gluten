@@ -76,8 +76,8 @@
     <iceberg.binary.version>10</iceberg.binary.version>
     <paimon.version>1.2.0</paimon.version>
     <delta.package.name>delta-spark</delta.package.name>
-    <delta.version>3.3.2</delta.version>
-    <delta.binary.version>33</delta.binary.version>
+    <delta.version>3.2.1</delta.version>
+    <delta.binary.version>32</delta.binary.version>
     <aws-java-sdk-dynamodb.version>1.12.262</aws-java-sdk-dynamodb.version>
     <celeborn.version>0.6.1</celeborn.version>
     <uniffle.version>0.10.0</uniffle.version>
@@ -1189,8 +1189,8 @@
         <spark.version>3.5.5</spark.version>
         <iceberg.version>1.10.0</iceberg.version>
         <delta.package.name>delta-spark</delta.package.name>
-        <delta.version>3.3.2</delta.version>
-        <delta.binary.version>33</delta.binary.version>
+        <delta.version>3.2.1</delta.version>
+        <delta.binary.version>32</delta.binary.version>
         <hudi.version>0.15.0</hudi.version>
         <fasterxml.version>2.15.1</fasterxml.version>
         <hadoop.version>3.3.4</hadoop.version>

@@ -25,8 +25,8 @@ import org.apache.gluten.extension.injector.Injector
 import org.apache.spark.sql.execution.command.ExecutedCommandExec
 import org.apache.spark.sql.execution.datasources.v2.{LeafV2CommandExec, OffloadDeltaCommand}
 
-class VeloxDelta33WriteComponent extends Component {
-  override def name(): String = "velox-delta33-write"
+class VeloxDelta32WriteComponent extends Component {
+  override def name(): String = "velox-delta32-write"
 
   override def dependencies(): Seq[Class[_ <: Component]] = classOf[VeloxDeltaComponent] :: Nil
 
