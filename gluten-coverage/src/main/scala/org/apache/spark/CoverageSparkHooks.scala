@@ -14,16 +14,17 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.gluten.coverage.listener
-
-import org.apache.spark.sql.catalyst.trees.TreeNodeTag
+package org.apache.spark
 
 /**
- * TreeNodeTag namespace for the coverage tool. The runner tags `qe.logical` with the matrix entry
- * id before running the query; the listener reads it back from the same reference. This is robust
- * to asynchronous listener delivery (no thread-locals required).
+ * Shim into `private[spark]` surface used by the coverage tool. The listener bus is asynchronous;
+ * the runner must drain it between matrix entries so window-based attribution cannot bleed events
+ * from one entry into the next.
  */
-object CoverageTags {
-  val ENTRY_ID: TreeNodeTag[String] =
-    TreeNodeTag[String]("org.apache.gluten.coverage.entry_id")
+object CoverageSparkHooks {
+
+  /** Blocks until the listener bus has delivered all posted events, or the timeout elapses. */
+  def waitUntilListenerBusEmpty(sc: SparkContext, timeoutMillis: Long): Unit = {
+    sc.listenerBus.waitUntilEmpty(timeoutMillis)
+  }
 }

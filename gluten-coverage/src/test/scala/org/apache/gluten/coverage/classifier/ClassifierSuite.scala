@@ -20,7 +20,8 @@ import org.apache.gluten.coverage.NodeVerdict
 import org.apache.gluten.extension.columnar.{FallbackTag, FallbackTags}
 
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Literal}
-import org.apache.spark.sql.execution.{FilterExec, LocalTableScanExec}
+import org.apache.spark.sql.catalyst.plans.logical.LocalRelation
+import org.apache.spark.sql.execution.{FilterExec, InputAdapter, LocalTableScanExec, WholeStageCodegenExec}
 import org.apache.spark.sql.types.{IntegerType, StringType}
 
 import org.scalatest.funsuite.AnyFunSuite
@@ -68,7 +69,20 @@ class ClassifierSuite extends AnyFunSuite {
     assert(fb.reason == "definitive")
   }
 
-  test("FilterExec without tag classifies as Fallback (counterpart-map defensive branch)") {
+  test("fallback reason is recovered from the logicalLink when the physical tag was stripped") {
+    // Gluten's RemoveFallbackTagRule strips physical FallbackTags before execution;
+    // GlutenFallbackReporter mirrors the reason onto the logical link first.
+    val child = localScan()
+    val filter = FilterExec(Literal(true), child)
+    val logical = LocalRelation(intAttr)
+    FallbackTags.add(logical, FallbackTag.Appendable("native validation said no"))
+    filter.setLogicalLink(logical)
+    val report = Classifier().classify(filter)
+    val fb = report.nodes.head.verdict.asInstanceOf[NodeVerdict.Fallback]
+    assert(fb.reason == "native validation said no")
+  }
+
+  test("FilterExec without any tag classifies as Fallback with the no-reason default") {
     val child = localScan()
     val filter = FilterExec(Literal(true), child)
     val report = Classifier().classify(filter)
@@ -76,7 +90,29 @@ class ClassifierSuite extends AnyFunSuite {
     assert(filterNode.opClass == "FilterExec")
     assert(filterNode.verdict.isInstanceOf[NodeVerdict.Fallback])
     val reason = filterNode.verdict.asInstanceOf[NodeVerdict.Fallback].reason
-    assert(reason.contains("untagged-fallback"))
+    assert(reason == Classifier.NO_REASON_RECORDED)
+  }
+
+  test("codegen scaffolding classifies as Neutral and is descended through") {
+    val child = localScan()
+    val filter = FilterExec(Literal(true), child)
+    val codegen = WholeStageCodegenExec(InputAdapter(filter))(codegenStageId = 1)
+    val report = Classifier().classify(codegen)
+    assert(
+      report.nodes.map(_.opClass) ==
+        Seq("WholeStageCodegenExec", "InputAdapter", "FilterExec", "LocalTableScanExec"))
+    assert(report.neutralCount == 2)
+    assert(report.fallbackCount == 1) // the FilterExec inside
+    // Neutral nodes are excluded from actionable counts entirely.
+    assert(report.nativeCount == 0)
+    assert(report.vanillaCount == 1)
+  }
+
+  test("nodeName is captured alongside opClass for event-reason joining") {
+    val filter = FilterExec(Literal(true), localScan())
+    val report = Classifier().classify(filter)
+    assert(report.nodes.head.opClass == "FilterExec")
+    assert(report.nodes.head.nodeName == "Filter")
   }
 
   test("plan walk visits children in depth-first root-first order with depth tracking") {

@@ -26,6 +26,7 @@ case class RunnerOptions(
     mode: String = "full",
     timeoutSeconds: Long = 900L,
     verbose: Boolean = false,
+    metadataWeight: Double = 0.25,
     deltaVersionOverride: Option[String] = None,
     glutenVersionOverride: Option[String] = None,
     backendOverride: Option[String] = None
@@ -46,6 +47,10 @@ object RunnerOptions {
           case "--mode" => opts = opts.copy(mode = value)
           case "--timeout" => opts = opts.copy(timeoutSeconds = value.toLong)
           case "--verbose" => opts = opts.copy(verbose = true)
+          case "--metadata-weight" =>
+            val w = value.toDouble
+            require(w >= 0.0 && w <= 1.0, s"--metadata-weight must be in [0, 1], got $w")
+            opts = opts.copy(metadataWeight = w)
           case "--delta-version" => opts = opts.copy(deltaVersionOverride = Some(value))
           case "--gluten-version" => opts = opts.copy(glutenVersionOverride = Some(value))
           case "--backend" => opts = opts.copy(backendOverride = Some(value))
@@ -77,6 +82,8 @@ object RunnerOptions {
         |  --mode=full|smoke      Run mode (default: full). Smoke runs a curated subset.
         |  --timeout=SECONDS      Wall-clock budget for the entire run (default: 900)
         |  --verbose              Include all entries in the markdown (default: only non-native)
+        |  --metadata-weight=W    Weight of delta-metadata nodes in the node-weighted metric,
+        |                         in [0, 1] (default: 0.25; 0 excludes, 1 full weight)
         |  --delta-version=X      Override Delta version reported in the environment block
         |  --gluten-version=X     Override Gluten version reported in the environment block
         |  --backend=X            Override backend reported (default: velox)

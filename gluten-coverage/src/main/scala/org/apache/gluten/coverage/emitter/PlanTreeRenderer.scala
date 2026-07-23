@@ -30,13 +30,14 @@ object PlanTreeRenderer {
 
   /**
    * Marker shorthand used in the rendered tree: [N] Native, [F] Fallback, [A:tax] tax-adapter,
-   * [A:benign] benign-adapter, [V] Vanilla, [?] Unknown.
+   * [A:benign] benign-adapter, [V] Vanilla, [-] Neutral (wrapper/infrastructure), [?] Unknown.
    */
   def marker(verdict: NodeVerdict): String = verdict match {
     case _: NodeVerdict.Native => "[N]"
     case _: NodeVerdict.Fallback => "[F]"
     case a: NodeVerdict.Adapter => if (a.isTax) "[A:tax]" else "[A:benign]"
     case _: NodeVerdict.Vanilla => "[V]"
+    case _: NodeVerdict.Neutral => "[-]"
     case _: NodeVerdict.Unknown => "[?]"
   }
 
@@ -71,7 +72,7 @@ object PlanTreeRenderer {
     val seen = scala.collection.mutable.LinkedHashSet.empty[(String, String)]
     val out = scala.collection.mutable.ArrayBuffer.empty[FallbackBoundary]
     report.nodes.foreach {
-      case ClassifiedNode(opClass, depth, _, NodeVerdict.Fallback(_, reason)) =>
+      case ClassifiedNode(opClass, _, depth, _, NodeVerdict.Fallback(_, reason)) =>
         val key = (opClass, reason)
         if (!seen.contains(key)) {
           seen.add(key)

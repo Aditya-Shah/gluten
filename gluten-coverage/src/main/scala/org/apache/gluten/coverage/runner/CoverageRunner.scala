@@ -17,23 +17,29 @@
 package org.apache.gluten.coverage.runner
 
 import org.apache.gluten.coverage.emitter.{BaselineDiffer, JsonEmitter, MarkdownEmitter}
-import org.apache.gluten.coverage.listener.{CoverageQueryExecutionListener, CoverageTags, PlanCollector}
+import org.apache.gluten.coverage.listener.{CoverageSparkListener, PlanCollector}
 import org.apache.gluten.coverage.matrix.{BuildEnvironment, LoadedMatrix, MatrixEntry, MatrixLoader}
 import org.apache.gluten.coverage.report.{CoverageReport, ReportBuilder}
 
-import org.apache.spark.SparkContext
+import org.apache.spark.{CoverageSparkHooks, SparkContext}
 import org.apache.spark.sql.SparkSession
 
 /**
  * Standalone driver for the coverage tool. Loads matrices via ServiceLoader, runs each entry's
- * setup/query/teardown SQL against a single SparkSession, captures executed plans via a
- * QueryExecutionListener, and writes JSON + Markdown reports.
+ * setup/query/teardown SQL against a single SparkSession, captures every SQL execution (including
+ * nested executions spawned by commands) via a SparkListener, and writes JSON + Markdown reports.
+ *
+ * Attribution: each entry's `query_sql` runs inside a bracket of `sc.addJobTag` + an open collector
+ * window, with the listener bus drained at the edges so events cannot bleed between entries. See
+ * [[PlanCollector]] for the attribution layers.
  *
  * Invoked as `java -cp ... org.apache.gluten.coverage.runner.CoverageRunner [options]`.
  */
 object CoverageRunner {
 
   // scalastyle:off println
+
+  private val LISTENER_BUS_DRAIN_TIMEOUT_MS = 60000L
 
   def main(args: Array[String]): Unit = {
     val opts = RunnerOptions.parse(args)
@@ -44,6 +50,7 @@ object CoverageRunner {
   def runWith(opts: RunnerOptions): Int = {
     val spark = newSparkSession()
     try {
+      warnIfFallbackReportingDisabled(spark)
       val env = buildEnvironment(spark, opts)
       val loader = new MatrixLoader(env)
       val matrices =
@@ -57,8 +64,8 @@ object CoverageRunner {
       }
 
       val collector = new PlanCollector()
-      val listener = new CoverageQueryExecutionListener(collector)
-      spark.listenerManager.register(listener)
+      val listener = new CoverageSparkListener(collector)
+      spark.sparkContext.addSparkListener(listener)
       try {
         matrices.foreach {
           matrix =>
@@ -66,7 +73,7 @@ object CoverageRunner {
             writeOutputs(report, opts)
         }
       } finally {
-        spark.listenerManager.unregister(listener)
+        spark.sparkContext.removeSparkListener(listener)
       }
       0
     } finally {
@@ -85,6 +92,7 @@ object CoverageRunner {
       s"[gluten-coverage] running matrix '${matrix.descriptor.id}' " +
         s"(${matrix.entries.size} entries) ...")
 
+    collector.clear()
     val outcomes = matrix.entries.map {
       entry =>
         val versionSkipped =
@@ -92,15 +100,28 @@ object CoverageRunner {
         if (versionSkipped) {
           println(s"  [skip] ${entry.id} (version-gated)")
         } else {
-          runEntry(spark, entry)
+          runEntry(spark, entry, collector)
         }
-        ReportBuilder.buildOutcome(entry, collector, env, versionSkipped)
+        ReportBuilder.buildOutcome(entry, collector, versionSkipped)
     }
 
-    val report = ReportBuilder.build(matrix, outcomes, env, includePlanTree = opts.verbose)
+    val report = ReportBuilder.build(
+      matrix,
+      outcomes,
+      env,
+      includePlanTree = opts.verbose,
+      metadataWeight = opts.metadataWeight,
+      unattributedExecutions = collector.unattributedRecords.size
+    )
     val gateCheck = opts.baseline.map {
       f =>
         val baseline = JsonEmitter.parseFile(f)
+        require(
+          baseline.schemaVersion == ReportBuilder.SCHEMA_VERSION,
+          s"Baseline ${f.getPath} has schema_version=${baseline.schemaVersion}; this tool " +
+            s"writes schema_version=${ReportBuilder.SCHEMA_VERSION}. Regenerate the baseline " +
+            "with this tool version before gating."
+        )
         BaselineDiffer.diff(report, Some(baseline))
     }
     val finalReport = report.copy(gateCheck = gateCheck)
@@ -108,32 +129,45 @@ object CoverageRunner {
     println(
       s"[gluten-coverage] matrix '${matrix.descriptor.id}' done: " +
         s"entry-pure-native=${finalReport.summary.entryPureNativePercent}% " +
-        s"node-weighted=${finalReport.summary.nodeWeightedPercent}%")
+        s"node-weighted=${finalReport.summary.nodeWeightedPercent}% " +
+        s"multi-execution-entries=${finalReport.summary.entriesMultiExecution}")
 
     finalReport
   }
 
-  private def runEntry(spark: SparkSession, entry: MatrixEntry): Unit = {
+  private def runEntry(spark: SparkSession, entry: MatrixEntry, collector: PlanCollector): Unit = {
+    val sc = spark.sparkContext
+    val tag = s"${PlanCollector.TAG_PREFIX}${entry.id}"
     val priorConfig = applyConfigOverrides(spark, entry.config)
     try {
-      entry.setupSql.foreach(sql => runUntagged(spark, sql))
-      entry.querySql.foreach(sql => runTagged(spark, sql, entry.id))
-      entry.teardownSql.foreach(sql => runUntagged(spark, sql))
+      entry.setupSql.foreach(sql => runStatements(spark, sql))
+      drainListenerBus(sc)
+      sc.addJobTag(tag)
+      collector.openWindow(entry.id)
+      try {
+        entry.querySql.foreach(sql => runStatements(spark, sql))
+      } finally {
+        drainListenerBus(sc)
+        collector.closeWindow()
+        sc.removeJobTag(tag)
+      }
+      entry.teardownSql.foreach(sql => runStatements(spark, sql))
+      drainListenerBus(sc)
     } catch {
       case t: Throwable =>
-        // Record as error; we attribute to entry.id since the listener may not have fired.
-        // The collector merges any plans the listener did capture before the throw.
+        // Record as error; plans the listener captured before the throw are kept and merged.
         System.err.println(s"  [error] ${entry.id}: ${t.getClass.getSimpleName}: ${t.getMessage}")
+        collector.addError(entry.id, t.getClass.getSimpleName, String.valueOf(t.getMessage))
+        // The window may still be open if the failure happened in setup; make sure it is not.
+        collector.closeWindow()
+        sc.removeJobTag(tag)
     } finally {
       restoreConfig(spark, priorConfig)
     }
   }
 
-  /**
-   * Runs a SQL string, splitting on semicolons so multi-statement setup/teardown blocks work. No
-   * tag is set; the listener will ignore.
-   */
-  private def runUntagged(spark: SparkSession, sql: String): Unit = {
+  /** Runs a SQL string, splitting on semicolons so multi-statement blocks work. */
+  private def runStatements(spark: SparkSession, sql: String): Unit = {
     splitStatements(sql).foreach {
       stmt =>
         val df = spark.sql(stmt)
@@ -141,21 +175,8 @@ object CoverageRunner {
     }
   }
 
-  /**
-   * Tags the parsed logical plan with the entry id so the listener can attribute the executed plan
-   * back to this matrix entry. The first statement in a multi-statement block is the tagged one
-   * (the matrix convention is that `query_sql` is one statement).
-   */
-  private def runTagged(spark: SparkSession, sql: String, entryId: String): Unit = {
-    val statements = splitStatements(sql)
-    statements.zipWithIndex.foreach {
-      case (stmt, idx) =>
-        val df = spark.sql(stmt)
-        if (idx == 0) {
-          df.queryExecution.logical.setTagValue(CoverageTags.ENTRY_ID, entryId)
-        }
-        df.collect()
-    }
+  private def drainListenerBus(sc: SparkContext): Unit = {
+    CoverageSparkHooks.waitUntilListenerBusEmpty(sc, LISTENER_BUS_DRAIN_TIMEOUT_MS)
   }
 
   private def splitStatements(sql: String): Seq[String] = sql
@@ -163,6 +184,18 @@ object CoverageRunner {
     .map(_.trim)
     .filter(_.nonEmpty)
     .toSeq
+
+  private def warnIfFallbackReportingDisabled(spark: SparkSession): Unit = {
+    val reporter =
+      spark.conf.getOption("spark.gluten.sql.columnar.fallbackReporter").getOrElse("true")
+    val ui = spark.conf.getOption("spark.gluten.ui.enabled").getOrElse("true")
+    if (reporter != "true" || ui != "true") {
+      System.err.println(
+        "[gluten-coverage] WARNING: spark.gluten.sql.columnar.fallbackReporter and " +
+          "spark.gluten.ui.enabled should both be true; without them fallback reasons degrade " +
+          s"to '${org.apache.gluten.coverage.classifier.Classifier.NO_REASON_RECORDED}'.")
+    }
+  }
 
   /**
    * Applies the entry's config overrides via `spark.conf.set` and returns the prior values so they

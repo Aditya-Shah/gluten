@@ -60,6 +60,13 @@
       <artifactId>spark-catalyst_${scala.binary.version}</artifactId>
       <scope>provided</scope>
     </dependency>
+    <!-- Needed at compile scope for FileIndex.rootPaths (org.apache.hadoop.fs.Path). -->
+    <dependency>
+      <groupId>org.apache.hadoop</groupId>
+      <artifactId>hadoop-client</artifactId>
+      <version>${hadoop.version}</version>
+      <scope>provided</scope>
+    </dependency>
     <dependency>
       <groupId>com.fasterxml.jackson.core</groupId>
       <artifactId>jackson-core</artifactId>
@@ -111,14 +118,19 @@
       <type>test-jar</type>
     </dependency>
     <dependency>
-      <groupId>org.apache.hadoop</groupId>
-      <artifactId>hadoop-client</artifactId>
-      <version>${hadoop.version}</version>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
       <groupId>org.scalatest</groupId>
       <artifactId>scalatest_${scala.binary.version}</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!--
+      Spark's catalog code (IdentifierImpl) uses org.apache.arrow.util.Preconditions, but the
+      Gluten build excludes Spark's transitive Arrow. Needed only for tests that exercise the
+      session catalog (CTAS integration test).
+    -->
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-vector</artifactId>
+      <version>${arrow.version}</version>
       <scope>test</scope>
     </dependency>
   </dependencies>

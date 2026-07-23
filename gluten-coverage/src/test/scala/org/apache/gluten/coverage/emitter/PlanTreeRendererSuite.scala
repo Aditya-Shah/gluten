@@ -25,15 +25,27 @@ class PlanTreeRendererSuite extends AnyFunSuite {
   test("renderTree shows depth-indented nodes with verdict markers") {
     val report = PlanReport(
       Seq(
-        ClassifiedNode("WriteIntoDataSourceV2", 0, None, NodeVerdict.Vanilla("...")),
+        ClassifiedNode(
+          "AdaptiveSparkPlanExec",
+          "AdaptiveSparkPlan",
+          0,
+          None,
+          NodeVerdict.Neutral("AdaptiveSparkPlanExec")),
         ClassifiedNode(
           "VeloxColumnarToRowExec",
+          "VeloxColumnarToRow",
           1,
           Some(0),
           NodeVerdict
             .Adapter("VeloxColumnarToRowExec", AdapterDirection.ColumnarToRow, isTax = true)),
-        ClassifiedNode("WholeStageTransformer", 2, Some(1), NodeVerdict.Native("...")),
         ClassifiedNode(
+          "WholeStageTransformer",
+          "WholeStageTransformer",
+          2,
+          Some(1),
+          NodeVerdict.Native("...")),
+        ClassifiedNode(
+          "MergeIntoCommandEdge",
           "MergeIntoCommandEdge",
           1,
           Some(0),
@@ -42,7 +54,7 @@ class PlanTreeRendererSuite extends AnyFunSuite {
     )
     val tree = PlanTreeRenderer.renderTree(report)
     val expected =
-      """[V] WriteIntoDataSourceV2
+      """[-] AdaptiveSparkPlanExec
         |  [A:tax] VeloxColumnarToRowExec
         |    [N] WholeStageTransformer
         |  [F] MergeIntoCommandEdge -- "MERGE INTO not yet offloaded"""".stripMargin
@@ -56,11 +68,26 @@ class PlanTreeRendererSuite extends AnyFunSuite {
   test("boundaries returns deduped fallback nodes in walk order") {
     val report = PlanReport(
       Seq(
-        ClassifiedNode("MergeIntoCommandEdge", 0, None, NodeVerdict.Fallback("Merge", "no merge")),
-        ClassifiedNode("Project", 1, Some(0), NodeVerdict.Fallback("Project", "untagged")),
+        ClassifiedNode(
+          "MergeIntoCommandEdge",
+          "MergeIntoCommandEdge",
+          0,
+          None,
+          NodeVerdict.Fallback("Merge", "no merge")),
+        ClassifiedNode(
+          "Project",
+          "Project",
+          1,
+          Some(0),
+          NodeVerdict.Fallback("Project", "untagged")),
         // duplicate of above (opClass + reason both match) -- should be deduped
-        ClassifiedNode("Project", 2, Some(1), NodeVerdict.Fallback("Project", "untagged")),
-        ClassifiedNode("DeltaScan", 3, Some(2), NodeVerdict.Vanilla("DeltaScan"))
+        ClassifiedNode(
+          "Project",
+          "Project",
+          2,
+          Some(1),
+          NodeVerdict.Fallback("Project", "untagged")),
+        ClassifiedNode("DeltaScan", "DeltaScan", 3, Some(2), NodeVerdict.Vanilla("DeltaScan"))
       )
     )
     val bs = PlanTreeRenderer.boundaries(report)
@@ -74,8 +101,13 @@ class PlanTreeRendererSuite extends AnyFunSuite {
   test("boundaries empty when plan is fully native") {
     val report = PlanReport(
       Seq(
-        ClassifiedNode("Transformer", 0, None, NodeVerdict.Native("Transformer")),
-        ClassifiedNode("Transformer2", 1, Some(0), NodeVerdict.Native("Transformer2"))
+        ClassifiedNode("Transformer", "Transformer", 0, None, NodeVerdict.Native("Transformer")),
+        ClassifiedNode(
+          "Transformer2",
+          "Transformer2",
+          1,
+          Some(0),
+          NodeVerdict.Native("Transformer2"))
       )
     )
     assert(PlanTreeRenderer.boundaries(report).isEmpty)

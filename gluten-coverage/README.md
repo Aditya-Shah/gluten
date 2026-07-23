@@ -30,17 +30,23 @@ silently.
 Two complementary metrics, both surfaced in every report:
 
 - **Entry-pure-native percent (headline)** -- `entries_with_zero_fallback_nodes /
-  total_actionable_entries`. User-faithful: an integration's operation either runs fully native
-  or it doesn't from the user's perspective. Even one fallback node means hitting the JVM tax.
-  The CI gate's regression check is on this metric.
+  total_actionable_entries`, computed over an entry's *data-path* executions (scans, writes,
+  queries -- not Delta-log bookkeeping). User-faithful: an integration's operation either runs
+  fully native or it doesn't from the user's perspective. Even one fallback node means hitting
+  the JVM tax. The CI gate's regression check is on this metric.
 
-- **Node-weighted percent (detail)** -- `native_nodes / (native + fallback + tax_adapters)`.
-  Surfaces partial progress that the entry-pure-native metric cannot show. A PR that converts
-  4 of 5 nodes in a MERGE plan to native shifts node-weighted upward but leaves
-  entry-pure-native unchanged. Both signals are useful: entry-pure-native is the gate-on
-  metric (a regression there means a user-visible regression); node-weighted is the diagnostic.
+- **Node-weighted percent (detail)** -- `(native + w*meta_native) / (native + fallback +
+  tax_adapters + w*(meta_native + meta_fallback + meta_tax))`, where `w` is
+  `--metadata-weight` (default 0.25). Delta-metadata executions (state reconstruction,
+  checkpoints) are always captured and reported but weighted lower so log replay does not
+  drown the data-path signal. Surfaces partial progress that the entry-pure-native metric
+  cannot show.
 
-Both formulas are documented in the JSON output schema so external consumers do not have to
+- **Fallback Pareto ("what to fix first")** -- every fallback `(operator, normalized reason)`
+  pair ranked by the number of entries it blocks, with node counts, execution durations,
+  affected features/phases, and sample entries. This is the report's prioritization deliverable.
+
+The formulas are documented in the JSON output schema so external consumers do not have to
 guess.
 
 `benign_adapters` (adapter pairs entirely inside a single `WholeStageTransformer` boundary) and
@@ -57,18 +63,19 @@ penalising them inflates the failure rate spuriously.
        YAML  --> | MatrixLoader | --> matrices (one per integration)
                  +--------------+
                                 +-----+
-                       spark.sql| Run |
-                       <------- |     | <-- MatrixEntry
+                       spark.sql| Run | <-- MatrixEntry
+                       <------- |     |     (addJobTag + window per entry)
                                 +--|--+
+                                   |  SparkListenerSQLExecutionStart/End,
+                                   |  GlutenPlanFallbackEvent, JobStart
+                                   v
+                         CoverageSparkListener
+                                   |  attribute: jobTag -> rootExecutionId -> window
+                                   v
+                              Classifier --> ExecutionRecords per entry (phase-labelled)
                                    |
                                    v
-                          QueryExecutionListener
-                                   |
-                                   v
-                              Classifier --> PlanReport per entry
-                                   |
-                                   v
-                            ReportBuilder --> CoverageReport
+                            ReportBuilder --> CoverageReport (+ fallback pareto)
                                    |
                                    v
                        +------+   +-------+
@@ -88,18 +95,28 @@ Pipeline:
    `java.util.ServiceLoader`, loads each integration's YAML matrix, validates schema version
    and id uniqueness, drops archived entries.
 2. The runner constructs a single SparkSession (with the integration's plugin/extensions
-   registered) and registers a `CoverageQueryExecutionListener` on it.
-3. For each matrix entry, the runner runs `setup_sql` (untagged), then tags the parsed
-   logical plan of `query_sql` with the entry id (`TreeNodeTag`) before executing, then runs
-   `teardown_sql` (untagged).
-4. The listener fires `onSuccess` with the post-AQE `QueryExecution`. It reads the entry id
-   from `qe.logical`, classifies `qe.executedPlan` via the Classifier, and appends to the
-   collector.
-5. `ReportBuilder` aggregates the collector into a `CoverageReport` with summary, per-feature
-   breakdown, per-entry detail, and a discrepancy report against the upstream feature-claims
-   doc.
+   registered) and registers a `CoverageSparkListener` on the Spark listener bus. A
+   `SparkListener` -- unlike a `QueryExecutionListener`, which Spark only notifies for *named*
+   executions -- receives **every** `SparkListenerSQLExecutionStart`/`End` pair, with the live
+   `QueryExecution` attached to the end event. This is what makes command entries work: in
+   Spark 3.5 a DML command executes eagerly inside `spark.sql()` and spawns nested SQL
+   executions (Delta: candidate-file scans, `deltaTransactionalWrite` writes, DV builds, state
+   reconstruction, checkpoints) that never reach a `QueryExecutionListener`.
+3. For each matrix entry, the runner runs `setup_sql`, drains the listener bus, then brackets
+   `query_sql` with `sc.addJobTag("gluten-coverage:<id>")` and an open collector window, drains
+   again, and runs `teardown_sql`. Attribution of each captured execution uses the most precise
+   layer that matches: the job tag on the event, root-execution-id chaining to an already
+   attributed execution, then the open window. Unmatched executions land in an `unattributed`
+   bucket -- never on the wrong entry.
+4. Each execution is classified at end-event time (post-AQE final plan) into an
+   `ExecutionRecord` with a phase: `command` / `write` / `dml-scan` / `query` (counted in the
+   entry verdict) or `delta-metadata` / `job-only` (captured and reported, not verdict-counted).
+5. `ReportBuilder` aggregates the records into a `CoverageReport` with summary, per-feature
+   breakdown (including scan vs write coverage), per-entry per-execution detail, and the
+   fallback Pareto.
 6. `JsonEmitter` and `MarkdownEmitter` write the artefacts. `BaselineDiffer` (when a baseline
    is provided) computes the delta and produces a `GateCheck` that the CI workflow inspects.
+   Baselines must be schema v2; older baselines fail with an explicit regenerate error.
 
 ---
 
@@ -112,28 +129,45 @@ node with one of:
 - **Fallback** -- node executes on the JVM because Gluten declined or refused to offload.
 - **Adapter** -- a `ColumnarToRowExec` / `RowToColumnarExec` boundary. Tax-adapter when the
   parent is not native (the round-trip is a real cost); benign-adapter otherwise.
-- **Vanilla** -- a vanilla Spark plan node with no Gluten transformer counterpart (e.g., a
-  Subquery broker). Reported but excluded from the headline.
+- **Vanilla** -- a vanilla Spark plan node with no Gluten transformer counterpart. Reported
+  but excluded from the headline.
+- **Neutral** -- execution infrastructure: AQE shells (`AdaptiveSparkPlanExec`,
+  `QueryStageExec`), command wrappers (`ExecutedCommandExec`, `CommandResultExec`), codegen
+  scaffolding (`WholeStageCodegenExec`, `InputAdapter`), reuse/subquery brokers. Excluded from
+  every numerator and denominator.
 - **Unknown** -- a node the classifier does not recognise. Forces a tool-side error rather
   than silently bucketing into Native.
 
-Decision tree (in order):
+Wrapper traversal: `AdaptiveSparkPlanExec` descends into its materialized `executedPlan`,
+`QueryStageExec` into `plan`, reuse/subquery brokers into their targets, and `plan.subqueries`
+is walked at every node. Without this, any AQE-wrapped query (anything with a shuffle)
+classifies as a single meaningless node. Command wrappers are *not* descended: a V1 command's
+real work runs as separate SQL executions that are captured independently.
 
-1. `FallbackTags.nonEmpty(node)` -> **Fallback** (reason from the tag).
-2. `node.isInstanceOf[WholeStageTransformer]` -> **Native** (wraps a native region).
-3. `node.isInstanceOf[TransformSupport]` -> **Native** (individual transformer).
-4. `node.isInstanceOf[ColumnarToRowExecBase]` -> **Adapter** (Columnar -> Row).
-5. `node.isInstanceOf[RowToColumnarExecBase]` -> **Adapter** (Row -> Columnar).
-6. `node.isInstanceOf[GlutenPlan]` -> **Native** (rare; non-TransformSupport Gluten node).
-7. `CounterpartMap.hasCounterpart(opClass)` -> **Fallback** (untagged-fallback; defensive).
-8. otherwise -> **Vanilla**.
+Decision tree for regular nodes (in order):
+
+1. `WholeStageTransformer` / `TransformSupport` / other `GlutenPlan` -> **Native**.
+2. `ColumnarToRowExecBase` / `RowToColumnarExecBase` -> **Adapter**.
+3. FallbackTag on the node, or on its `logicalLink` -> **Fallback** (reason from the tag).
+   Gluten's `RemoveFallbackTagRule` strips physical tags before execution;
+   `GlutenFallbackReporter` mirrors the reason onto the logical link, which is where an
+   executed plan's reason actually lives.
+4. `CounterpartMap.hasCounterpart(opClass)` -> **Fallback** ("no reason recorded"; the
+   collector then tries to backfill the reason from `GlutenPlanFallbackEvent`, joined by
+   execution id and node name).
+5. otherwise -> **Vanilla**.
+
+Raw reasons are additionally normalized to stable codes (`DELTA_DV_READ_NOT_SUPPORTED`,
+`NATIVE_VALIDATION_EXCEPTION`, `ANSI_MODE`, ...) by `ReasonNormalizer` so the Pareto can
+aggregate one root cause across operators and entries. Growing that table is the intended
+curation loop.
 
 The classifier reuses Gluten's own runtime signals (`FallbackTags`, `TransformSupport`,
-`WholeStageTransformer`, `ColumnarToRowExecBase`, `RowToColumnarExecBase`, `GlutenPlan`).
-This is deliberate: the tool's verdict matches Gluten's actual offload behaviour by
-construction. Re-implementing classification logic would create drift.
+`WholeStageTransformer`, `ColumnarToRowExecBase`, `RowToColumnarExecBase`, `GlutenPlan`,
+`GlutenPlanFallbackEvent`). This is deliberate: the tool's verdict matches Gluten's actual
+offload behaviour by construction. Re-implementing classification logic would create drift.
 
-The "untagged fallback" branch (step 7) catches plans where validator tagging skipped — a
+The "no reason recorded" branch (step 4) catches plans where no reason was recoverable -- a
 vanilla node whose class appears in `CounterpartMap` (e.g., `FilterExec`, `ProjectExec`) is
 classified as Fallback rather than Vanilla. The catalogue is conservative: missing entries
 classify as Vanilla, which understates the fallback rate but never overstates it.
@@ -188,6 +222,7 @@ CLI options:
 | `--mode=full|smoke` | `full` | Run mode. (Smoke is reserved; not yet implemented.) |
 | `--timeout=SECONDS` | `900` | Wall-clock budget for the entire run. |
 | `--verbose` | off | Include all entries (and their plan trees) in the markdown. Otherwise only non-native entries are detailed. |
+| `--metadata-weight=W` | `0.25` | Weight of delta-metadata nodes in the node-weighted metric, in [0, 1]. `0` excludes them from the number (they are still captured and reported); `1` counts them fully. |
 | `--delta-version=X` | (system property) | Override Delta version reported in the environment block. |
 | `--gluten-version=X` | (system property) | Override Gluten version reported. |
 | `--backend=X` | `velox` | Override backend reported. |
@@ -225,8 +260,10 @@ entries:
     notes: "Optional human note"
 ```
 
-The runner runs `setup_sql` (untagged, listener ignores), `query_sql` (tagged via TreeNodeTag
-on `qe.logical`; listener captures the executed plan), then `teardown_sql` (untagged).
+The runner runs `setup_sql` (outside the attribution bracket, so its executions are ignored),
+then `query_sql` inside a job-tag + window bracket (every SQL execution it spawns -- including
+a command's nested executions -- is captured and attributed to the entry), then `teardown_sql`
+(outside the bracket).
 
 Field semantics:
 
@@ -234,9 +271,8 @@ Field semantics:
   retire via `archived: true` and add a new entry instead.
 - `expected` -- one of `native`, `fallback`, `partial`, `unknown`. Used by the report to
   highlight regressions: an entry expected `native` that classified `fallback` is flagged.
-- `upstream_claim` -- copied from the integration's upstream feature-claims doc (for Delta:
-  `apache/gluten/docs/get-started/VeloxDelta.md`). The discrepancy report surfaces drift
-  between upstream documentation and measured behaviour.
+- `upstream_claim` -- parsed and ignored (schema v2 removed the upstream-doc discrepancy
+  report; the field remains legal so existing matrices need no edit).
 - `delta_min_version` / `spark_min_version` -- entry is skipped (and reported as
   `verdict: skipped`) if the running build is below the minimum.
 - `config` -- per-entry config overrides applied via `spark.conf.set` before the entry runs
@@ -296,39 +332,66 @@ Top-level shape:
   "summary": {
     "entry_pure_native_percent": 53.0,
     "node_weighted_percent": 67.3,
+    "metadata_node_weighted_percent": 12.0,
+    "metadata_weight": 0.25,
     "entries_pure_native": 53,
     "entries_partial": 8,
     "entries_fallback": 47,
     "entries_metadata": 6,
     "entries_skipped": 12,
     "entries_errored": 0,
+    "entries_multi_execution": 68,
     "node_native": 213,
     "node_fallback": 92,
     "node_tax_adapters": 25,
     "node_benign_adapters": 24,
     "node_vanilla": 5,
-    "node_unknown": 0
+    "node_neutral": 140,
+    "node_unknown": 0,
+    "metadata_node_native": 3,
+    "metadata_node_fallback": 120,
+    "metadata_node_tax_adapters": 8,
+    "unattributed_executions": 0,
+    "raw_jobs_uncaptured": 4
   },
   "by_feature": [
-    {"feature": "cow-read", "entry_pure_native_percent": 88.0, "node_weighted_percent": 92.0, ...}
+    {"feature": "cow-read", "entry_pure_native_percent": 88.0, "node_weighted_percent": 92.0,
+     "scan_node_weighted_percent": 92.0, "write_node_weighted_percent": 0.0, ...}
   ],
-  "discrepancies": [
-    {"id": "cdf-batch-read", "upstream_claim": "yes", "measured": "fallback", "delta": "regression-vs-doc"}
+  "fallback_pareto": [
+    {"op_class": "FileSourceScanExec", "reason_code": "DELTA_DV_READ_NOT_SUPPORTED",
+     "sample_reason": "Deletion vector is not supported in native.",
+     "entries_impacted": 14, "nodes": 31, "fallback_duration_ms": 8210,
+     "features": ["mor-read", "mor-write"], "phases": {"dml-scan": 22, "query": 9},
+     "sample_entries": ["mor-read-select-dv", "..."]}
   ],
   "entries": [
     {
-      "id": "cow-read-select-basic-int",
-      "feature": "cow-read",
-      "operation": "select",
+      "id": "cow-write-update-basic",
+      "feature": "cow-write",
+      "operation": "update",
       "dtype": "int",
-      "verdict": "native",
+      "verdict": "partial",
       "expected": "native",
-      "regression": false,
-      "duration_ms": 412,
-      "plan_summary": {"native": 4, "fallback": 0, "tax_adapters": 0, ...},
-      "fallback_reasons": [],
-      "fallback_nodes": [],
-      "plan_tree": null
+      "regression": true,
+      "duration_ms": 1412,
+      "plan_summary": {"native": 4, "fallback": 1, "tax_adapters": 0, ...},
+      "executions": [
+        {"phase": "command", "func": "command", "counted": true, "duration_ms": 12,
+         "plan_summary": {"neutral": 1, ...}, "fallback_nodes": []},
+        {"phase": "dml-scan", "func": "collect", "counted": true, "duration_ms": 310,
+         "plan_summary": {"native": 2, "fallback": 1, ...},
+         "fallback_nodes": [{"op_class": "FileSourceScanExec",
+                             "reason_code": "DELTA_DV_READ_NOT_SUPPORTED",
+                             "reason": "Deletion vector is not supported in native.", "depth": 3}]},
+        {"phase": "write", "func": "deltaTransactionalWrite", "counted": true,
+         "duration_ms": 890, "plan_summary": {"native": 2, ...}, "fallback_nodes": []},
+        {"phase": "delta-metadata", "func": "Cache Delta Table State #4", "counted": false,
+         "duration_ms": 200, "plan_summary": {"fallback": 6, ...}, "fallback_nodes": ["..."]}
+      ],
+      "fallback_reasons": ["Deletion vector is not supported in native."],
+      "fallback_nodes": ["..."],
+      "raw_jobs_uncaptured": 0
     }
   ],
   "gate_check": {
@@ -367,13 +430,13 @@ Layout:
 | Feature | Pure-native | Node-weighted | Entries (pure / fallback / total) |
 ...
 
+## What to fix first
+| Operator | Reason | Entries | Nodes | Duration (ms) | Phases | Features |
+...
+
 ## Gate check (when --baseline given)
 - Entry-pure-native delta: +X.Y%
 - Regressions (N): ...
-
-## Upstream documentation discrepancies
-| Entry | Upstream claim | Measured | Delta |
-...
 
 ## Regressions
 (entries with expected=native that did not classify as native)
@@ -400,8 +463,9 @@ To anchor expectations honestly:
   is a separate concern.
 - **Does not run a multi-axis matrix** (Spark x Integration x Scala) in one invocation. One
   environment per run; multiple environments require multiple runs.
-- **Does not explain root causes** for fallbacks. Reports the `FallbackTag.reason` verbatim;
-  classification, deduplication, and root-causing belong in a follow-on tool.
+- **Does not diagnose beyond Gluten's own reason strings.** It recovers, normalizes,
+  deduplicates, and ranks them (the Pareto), but the fix for a `NATIVE_VALIDATION_EXCEPTION`
+  still starts with reading the raw reason.
 - **Does not measure operator-internal sub-expression coverage**. Plan nodes are the
   granularity; a node classified Native may have a Velox-side scalar expression that itself
   fell back to Spark via Gluten's expression-fallback path. Sub-expression coverage is a
@@ -427,17 +491,22 @@ gluten-coverage/
     classifier/
       Classifier.scala                                   -- the decision tree
       CounterpartMap.scala                               -- vanilla-class -> "has counterpart" lookup
+      ReasonNormalizer.scala                             -- raw reason -> stable reason_code
     matrix/
       MatrixDescriptor.scala                             -- SPI trait
       MatrixEntry.scala                                  -- row schema (Jackson-bound)
       MatrixLoader.scala                                 -- ServiceLoader + YAML parsing + validation
     listener/
-      CoverageTags.scala                                 -- TreeNodeTag namespace
-      PlanCollector.scala                                -- thread-safe per-entry plan accumulator
-      CoverageQueryExecutionListener.scala               -- Spark listener -> classifier -> collector
+      ExecutionRecord.scala                              -- captured execution + phase model
+      PlanCollector.scala                                -- attribution layers + record assembly
+      CoverageSparkListener.scala                        -- listener-bus tap (SQL events, Gluten
+                                                            fallback events, raw jobs)
     runner/
       RunnerOptions.scala                                -- CLI parsing
       CoverageRunner.scala                               -- main class
+  src/main/scala/org/apache/spark/
+    CoverageSparkHooks.scala                             -- private[spark] shim (listener-bus drain)
+    sql/coverage/SqlEventAccess.scala                    -- private[sql] shim (event.qe access)
     report/
       Report.scala                                       -- output JSON model
       ReportBuilder.scala                                -- aggregator

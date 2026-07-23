@@ -39,6 +39,16 @@ object NodeVerdict {
     override def kind: String = "vanilla"
   }
 
+  /**
+   * Execution infrastructure that is neither work to offload nor a fallback: AQE shells
+   * (`AdaptiveSparkPlanExec`, `QueryStageExec`), command wrappers (`ExecutedCommandExec`,
+   * `CommandResultExec`), codegen scaffolding (`WholeStageCodegenExec`, `InputAdapter`), reuse and
+   * subquery brokers. Excluded from every metric numerator and denominator.
+   */
+  case class Neutral(opClass: String) extends NodeVerdict {
+    override def kind: String = "neutral"
+  }
+
   case class Unknown(opClass: String) extends NodeVerdict {
     override def kind: String = "unknown"
   }
@@ -50,8 +60,14 @@ object AdapterDirection {
   case object RowToColumnar extends AdapterDirection
 }
 
+/**
+ * One classified node of an executed plan. `opClass` is the simple class name (e.g. `FilterExec`);
+ * `nodeName` is Spark's display name (e.g. `Filter`), used to join per-node fallback reasons from
+ * `GlutenPlanFallbackEvent`, whose map is keyed by node name.
+ */
 case class ClassifiedNode(
     opClass: String,
+    nodeName: String,
     depth: Int,
     parentIndex: Option[Int],
     verdict: NodeVerdict)

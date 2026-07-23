@@ -25,21 +25,23 @@ case class PlanReport(nodes: Seq[ClassifiedNode]) {
   def fallbackCount: Int = nodes.count(_.verdict.isInstanceOf[NodeVerdict.Fallback])
 
   def taxAdapterCount: Int = nodes.count {
-    case ClassifiedNode(_, _, _, a: NodeVerdict.Adapter) => a.isTax
+    case ClassifiedNode(_, _, _, _, a: NodeVerdict.Adapter) => a.isTax
     case _ => false
   }
 
   def benignAdapterCount: Int = nodes.count {
-    case ClassifiedNode(_, _, _, a: NodeVerdict.Adapter) => !a.isTax
+    case ClassifiedNode(_, _, _, _, a: NodeVerdict.Adapter) => !a.isTax
     case _ => false
   }
 
   def vanillaCount: Int = nodes.count(_.verdict.isInstanceOf[NodeVerdict.Vanilla])
 
+  def neutralCount: Int = nodes.count(_.verdict.isInstanceOf[NodeVerdict.Neutral])
+
   def unknownCount: Int = nodes.count(_.verdict.isInstanceOf[NodeVerdict.Unknown])
 
   def fallbackReasons: Seq[String] = nodes.collect {
-    case ClassifiedNode(_, _, _, f: NodeVerdict.Fallback) => f.reason
+    case ClassifiedNode(_, _, _, _, f: NodeVerdict.Fallback) => f.reason
   }.distinct
 
   def isPureNative: Boolean = fallbackCount == 0 && unknownCount == 0

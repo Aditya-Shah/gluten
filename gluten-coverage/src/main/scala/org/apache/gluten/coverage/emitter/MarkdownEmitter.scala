@@ -16,7 +16,7 @@
  */
 package org.apache.gluten.coverage.emitter
 
-import org.apache.gluten.coverage.report.{CoverageReport, EntryReport, FeatureSummary, GateCheck}
+import org.apache.gluten.coverage.report.{CoverageReport, EntryReport, FeatureSummary, GateCheck, ParetoRow}
 
 import java.io.{File, FileWriter}
 
@@ -26,9 +26,9 @@ class MarkdownEmitter(verbose: Boolean) {
     val sb = new StringBuilder()
     appendHeader(sb, report)
     appendHeadline(sb, report)
+    appendPareto(sb, report.fallbackPareto)
     appendByFeature(sb, report.byFeature)
     appendGate(sb, report.gateCheck)
-    appendDiscrepancies(sb, report.discrepancies)
     appendRegressions(sb, report.entries)
     appendErrors(sb, report.entries)
     if (verbose) {
@@ -69,7 +69,8 @@ class MarkdownEmitter(verbose: Boolean) {
     sb.append(
       s"| **Entry-pure-native (headline)** | **${s.entryPureNativePercent}%** " +
         s"(${s.entriesPureNative} of $total) |\n")
-    sb.append(s"| Node-weighted (detail) | ${s.nodeWeightedPercent}% |\n")
+    sb.append(s"| Node-weighted (metadata at x${s.metadataWeight}) | ${s.nodeWeightedPercent}% |\n")
+    sb.append(s"| Delta-metadata node-weighted | ${s.metadataNodeWeightedPercent}% |\n")
     sb.append(
       s"| Entries: pure-native / partial / fallback | " +
         s"${s.entriesPureNative} / ${s.entriesPartial} / ${s.entriesFallback} |\n")
@@ -77,20 +78,63 @@ class MarkdownEmitter(verbose: Boolean) {
       s"| Entries: metadata / skipped / errored | " +
         s"${s.entriesMetadata} / ${s.entriesSkipped} / ${s.entriesErrored} |\n")
     sb.append(
-      s"| Nodes: native / fallback / tax-adapters | " +
+      s"| Nodes (data-path): native / fallback / tax-adapters | " +
         s"${s.nodeNative} / ${s.nodeFallback} / ${s.nodeTaxAdapters} |\n")
+    sb.append(
+      s"| Nodes (delta-metadata): native / fallback / tax-adapters | " +
+        s"${s.metadataNodeNative} / ${s.metadataNodeFallback} / " +
+        s"${s.metadataNodeTaxAdapters} |\n")
+    sb.append(s"| Entries with >=2 captured executions | ${s.entriesMultiExecution} |\n")
+    sb.append(
+      s"| Unattributed executions / raw jobs | " +
+        s"${s.unattributedExecutions} / ${s.rawJobsUncaptured} |\n")
+    sb.append("\n")
+    if (s.entriesMultiExecution == 0 && total > 0) {
+      sb.append(
+        "> **Attribution self-check failed:** no entry captured more than one execution. " +
+          "Command entries (UPDATE/DELETE/MERGE/OPTIMIZE) should each capture several. " +
+          "Check that the coverage listener is registered and the listener bus is draining.\n\n")
+    }
+  }
+
+  private def appendPareto(sb: StringBuilder, pareto: Seq[ParetoRow]): Unit = {
+    if (pareto.isEmpty) return
+    sb.append("## What to fix first\n\n")
+    sb.append(
+      "Fallback (operator, reason) pairs ranked by entries impacted; " +
+        "duration shown for context.\n\n")
+    sb.append("| Operator | Reason | Entries | Nodes | Duration (ms) | Phases | Features |\n")
+    sb.append("|---|---|---:|---:|---:|---|---|\n")
+    pareto.take(15).foreach {
+      row =>
+        val phases = row.phases.toSeq.sortBy(_._1).map { case (p, n) => s"$p:$n" }.mkString(", ")
+        sb.append(
+          s"| `${row.opClass}` | ${row.reasonCode} | ${row.entriesImpacted} | ${row.nodes} | " +
+            s"${row.fallbackDurationMs} | $phases | ${row.features.mkString(", ")} |\n")
+    }
+    sb.append("\n")
+    pareto.take(15).foreach {
+      row =>
+        val quoted = "\"" + row.sampleReason + "\""
+        sb.append(
+          s"- **${row.reasonCode}** (`${row.opClass}`): $quoted -- " +
+            s"e.g. ${row.sampleEntries.map(e => s"`$e`").mkString(", ")}\n")
+    }
     sb.append("\n")
   }
 
   private def appendByFeature(sb: StringBuilder, features: Seq[FeatureSummary]): Unit = {
     if (features.isEmpty) return
     sb.append("## By feature\n\n")
-    sb.append("| Feature | Pure-native | Node-weighted | Entries (pure / fallback / total) |\n")
-    sb.append("|---|---:|---:|---|\n")
+    sb.append(
+      "| Feature | Pure-native | Node-weighted | Scan | Write | " +
+        "Entries (pure / fallback / total) |\n")
+    sb.append("|---|---:|---:|---:|---:|---|\n")
     features.foreach {
       f =>
         sb.append(
           s"| ${f.feature} | ${f.entryPureNativePercent}% | ${f.nodeWeightedPercent}% | " +
+            s"${f.scanNodeWeightedPercent}% | ${f.writeNodeWeightedPercent}% | " +
             s"${f.entriesPureNative} / ${f.entriesWithFallback} / ${f.entriesTotal} |\n")
     }
     sb.append("\n")
@@ -114,19 +158,6 @@ class MarkdownEmitter(verbose: Boolean) {
         }
         sb.append("\n")
     }
-  }
-
-  private def appendDiscrepancies(
-      sb: StringBuilder,
-      discrepancies: Seq[org.apache.gluten.coverage.report.Discrepancy]): Unit = {
-    if (discrepancies.isEmpty) return
-    sb.append("## Upstream documentation discrepancies\n\n")
-    sb.append("| Entry | Upstream claim | Measured | Delta |\n")
-    sb.append("|---|---|---|---|\n")
-    discrepancies.foreach {
-      d => sb.append(s"| `${d.id}` | ${d.upstreamClaim} | ${d.measured} | ${d.delta} |\n")
-    }
-    sb.append("\n")
   }
 
   private def appendRegressions(sb: StringBuilder, entries: Seq[EntryReport]): Unit = {
@@ -177,33 +208,35 @@ class MarkdownEmitter(verbose: Boolean) {
     sb.append(s"- Verdict: ${e.verdict} (expected: ${e.expected})\n")
     val p = e.planSummary
     sb.append(
-      s"- Plan: ${p.native} native / ${p.fallback} fallback / " +
+      s"- Plan (counted executions): ${p.native} native / ${p.fallback} fallback / " +
         s"${p.taxAdapters} tax-adapter / ${p.benignAdapters} benign-adapter / " +
-        s"${p.vanilla} vanilla\n")
-    if (e.fallbackNodes.nonEmpty) {
-      sb.append("- Fallback boundaries:\n")
-      e.fallbackNodes.foreach {
-        fn =>
-          sb.append("  - `")
-          sb.append(fn.opClass)
-          sb.append("` (depth ")
-          sb.append(fn.depth)
-          sb.append(") -- ")
-          sb.append('"')
-          sb.append(fn.reason)
-          sb.append('"')
-          sb.append('\n')
+        s"${p.vanilla} vanilla / ${p.neutral} neutral\n")
+    if (e.executions.nonEmpty) {
+      sb.append(s"- Executions (${e.executions.size}):\n")
+      e.executions.foreach {
+        ex =>
+          val ps = ex.planSummary
+          val counted = if (ex.counted) "" else " (not counted)"
+          val func = ex.func.map(f => s" `$f`").getOrElse("")
+          sb.append(
+            s"  - **${ex.phase}**$func$counted: ${ps.native}N/${ps.fallback}F/" +
+              s"${ps.taxAdapters}T in ${ex.durationMs}ms\n")
+          ex.fallbackNodes.foreach {
+            fn =>
+              val quoted = "\"" + fn.reason + "\""
+              sb.append(s"    - `${fn.opClass}` [${fn.reasonCode}] -- $quoted\n")
+          }
+          ex.error.foreach(err => sb.append(s"    - error: $err\n"))
+          ex.planTree.foreach {
+            tree =>
+              sb.append("    ```\n")
+              tree.split('\n').foreach(line => sb.append("    ").append(line).append('\n'))
+              sb.append("    ```\n")
+          }
       }
     }
-    e.planTree.foreach {
-      tree =>
-        sb.append("- Plan tree:\n```\n")
-        sb.append(tree)
-        sb.append("\n```\n")
-    }
-    if (e.fallbackReasons.nonEmpty) {
-      sb.append("- Fallback reasons:\n")
-      e.fallbackReasons.foreach(r => sb.append(s"  - `$r`\n"))
+    if (e.rawJobsUncaptured > 0) {
+      sb.append(s"- Raw jobs without SQL execution (not classified): ${e.rawJobsUncaptured}\n")
     }
     e.error.foreach(err => sb.append(s"- Error: $err\n"))
     sb.append("\n")

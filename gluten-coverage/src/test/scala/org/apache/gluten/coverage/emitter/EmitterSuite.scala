@@ -23,38 +23,58 @@ import org.scalatest.funsuite.AnyFunSuite
 class EmitterSuite extends AnyFunSuite {
 
   private val sample: CoverageReport = CoverageReport(
-    schemaVersion = 1,
-    toolVersion = "0.1.0",
-    generatedAt = "2026-04-30T10:15:30Z",
+    schemaVersion = 2,
+    toolVersion = "0.2.0",
+    generatedAt = "2026-07-23T10:15:30Z",
     environment = EnvironmentReport(
       glutenVersion = "1.6.0",
       sparkVersion = "3.5.5",
-      deltaVersion = "3.3.2",
+      deltaVersion = "3.2.1",
       scalaBinaryVersion = "2.12",
       jdkVersion = "17",
       backend = "velox"),
-    matrix = MatrixSummary(id = "delta", schemaVersion = 1, entryCount = 2),
+    matrix = MatrixSummary(id = "delta", schemaVersion = 2, entryCount = 2),
     summary = Summary(
       entryPureNativePercent = 50.0,
       nodeWeightedPercent = 60.0,
+      metadataNodeWeightedPercent = 20.0,
+      metadataWeight = 0.25,
       entriesPureNative = 1,
       entriesPartial = 0,
       entriesFallback = 1,
       entriesMetadata = 0,
       entriesSkipped = 0,
       entriesErrored = 0,
+      entriesMultiExecution = 1,
       nodeNative = 3,
       nodeFallback = 2,
       nodeTaxAdapters = 0,
       nodeBenignAdapters = 0,
       nodeVanilla = 0,
-      nodeUnknown = 0
+      nodeNeutral = 2,
+      nodeUnknown = 0,
+      metadataNodeNative = 1,
+      metadataNodeFallback = 4,
+      metadataNodeTaxAdapters = 0,
+      unattributedExecutions = 0,
+      rawJobsUncaptured = 1
     ),
     byFeature = Seq(
-      FeatureSummary("cow-read", 100.0, 100.0, 1, 0, 1),
-      FeatureSummary("cow-write", 0.0, 0.0, 0, 1, 1)
+      FeatureSummary("cow-read", 100.0, 100.0, 100.0, 0.0, 1, 0, 1),
+      FeatureSummary("cow-write", 0.0, 0.0, 0.0, 0.0, 0, 1, 1)
     ),
-    discrepancies = Seq.empty,
+    fallbackPareto = Seq(
+      ParetoRow(
+        opClass = "FileSourceScanExec",
+        reasonCode = "DELTA_DV_READ_NOT_SUPPORTED",
+        sampleReason = "Deletion vector is not supported in native.",
+        entriesImpacted = 1,
+        nodes = 2,
+        fallbackDurationMs = 120L,
+        features = Seq("cow-write"),
+        phases = Map("dml-scan" -> 2),
+        sampleEntries = Seq("b")
+      )),
     entries = Seq(
       EntryReport(
         "a",
@@ -65,10 +85,22 @@ class EmitterSuite extends AnyFunSuite {
         "native",
         regression = false,
         durationMs = 100L,
-        planSummary = PlanSummary(3, 0, 0, 0, 0, 0),
+        planSummary = PlanSummary(3, 0, 0, 0, 0, 0, 0),
+        executions = Seq(
+          ExecutionReport(
+            phase = "query",
+            func = Some("collect"),
+            description = "select",
+            counted = true,
+            durationMs = 100L,
+            planSummary = PlanSummary(3, 0, 0, 0, 0, 0, 0),
+            fallbackNodes = Seq.empty,
+            planTree = None,
+            error = None
+          )),
         fallbackReasons = Seq.empty,
         fallbackNodes = Seq.empty,
-        planTree = None,
+        rawJobsUncaptured = 0,
         error = None
       ),
       EntryReport(
@@ -80,10 +112,44 @@ class EmitterSuite extends AnyFunSuite {
         "fallback",
         regression = false,
         durationMs = 200L,
-        planSummary = PlanSummary(0, 2, 0, 0, 0, 0),
-        fallbackReasons = Seq("MERGE not yet offloaded"),
-        fallbackNodes = Seq(FallbackNodeJson("MergeIntoCommandEdge", 0, "MERGE not yet offloaded")),
-        planTree = None,
+        planSummary = PlanSummary(0, 2, 0, 0, 0, 0, 0),
+        executions = Seq(
+          ExecutionReport(
+            phase = "dml-scan",
+            func = Some("collect"),
+            description = "merge scan",
+            counted = true,
+            durationMs = 120L,
+            planSummary = PlanSummary(0, 2, 0, 0, 0, 0, 0),
+            fallbackNodes = Seq(
+              FallbackNodeJson(
+                "FileSourceScanExec",
+                1,
+                "DELTA_DV_READ_NOT_SUPPORTED",
+                "Deletion vector is not supported in native.")),
+            planTree = None,
+            error = None
+          ),
+          ExecutionReport(
+            phase = "delta-metadata",
+            func = Some("Cache Delta Table State #1"),
+            description = "state reconstruction",
+            counted = false,
+            durationMs = 80L,
+            planSummary = PlanSummary(1, 4, 0, 0, 0, 0, 0),
+            fallbackNodes = Seq.empty,
+            planTree = None,
+            error = None
+          )
+        ),
+        fallbackReasons = Seq("Deletion vector is not supported in native."),
+        fallbackNodes = Seq(
+          FallbackNodeJson(
+            "FileSourceScanExec",
+            1,
+            "DELTA_DV_READ_NOT_SUPPORTED",
+            "Deletion vector is not supported in native.")),
+        rawJobsUncaptured = 1,
         error = None
       )
     ),
@@ -95,8 +161,14 @@ class EmitterSuite extends AnyFunSuite {
     val parsed = JsonEmitter.parse(json)
     assert(parsed.summary.entryPureNativePercent == 50.0)
     assert(parsed.summary.nodeWeightedPercent == 60.0)
+    assert(parsed.summary.metadataWeight == 0.25)
     assert(parsed.entries.size == 2)
-    assert(parsed.entries(1).fallbackReasons == Seq("MERGE not yet offloaded"))
+    assert(parsed.entries(1).executions.size == 2)
+    assert(parsed.entries(1).executions(1).phase == "delta-metadata")
+    assert(parsed.fallbackPareto.head.reasonCode == "DELTA_DV_READ_NOT_SUPPORTED")
+    assert(
+      parsed.entries(1).fallbackReasons ==
+        Seq("Deletion vector is not supported in native."))
   }
 
   test("JSON output uses snake_case field names") {
@@ -104,16 +176,21 @@ class EmitterSuite extends AnyFunSuite {
     assert(json.contains("\"entry_pure_native_percent\""))
     assert(json.contains("\"node_weighted_percent\""))
     assert(json.contains("\"by_feature\""))
+    assert(json.contains("\"fallback_pareto\""))
+    assert(json.contains("\"reason_code\""))
     assert(!json.contains("\"entryPureNativePercent\""))
   }
 
-  test("Markdown output contains the headline metric") {
+  test("Markdown output contains headline, pareto, and execution breakdown") {
     val md = new MarkdownEmitter(verbose = false).emit(sample)
     assert(md.contains("# Delta on Gluten"))
     assert(md.contains("**50.0%**"))
-    assert(md.contains("Node-weighted (detail) | 60.0%"))
+    assert(md.contains("## What to fix first"))
+    assert(md.contains("DELTA_DV_READ_NOT_SUPPORTED"))
     assert(md.contains("cow-read"))
     assert(md.contains("cow-write"))
+    assert(md.contains("**dml-scan**"))
+    assert(md.contains("delta-metadata"))
   }
 
   test("BaselineDiffer flags an entry that regressed from native to fallback") {
