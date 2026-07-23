@@ -19,7 +19,10 @@
 #   - Each entry has a unique stable `id`. Renaming is a baseline-breaking change; retire via
 #     `archived: true` and add a new entry instead.
 #   - `expected` is the verdict baseline at the program's M1 starting point (Gluten 1.6 +
-#     Delta 3.3.2 + Spark 3.5.5). It is updated as PRs land and the baseline is republished.
+#     Delta 3.2.1 + Spark 3.5.3). It is updated as PRs land and the baseline is republished.
+#   - Version gates reflect true feature minimums for this stack: e.g. identity-column SQL
+#     needs Spark 4.0 grammar + Delta 3.3; INT->BIGINT type widening needs Delta 3.3 (3.2's
+#     preview supports only byte->short->int); DEEP CLONE does not exist in OSS Delta at all.
 #   - `upstream_claim` is copied from apache/gluten/docs/get-started/VeloxDelta.md and used
 #     for the discrepancy report. Use `not-tested` when the upstream doc lists "Not tested".
 #   - SQL strings are passed verbatim to spark.sql(); multi-statement blocks split on `;`.
@@ -258,20 +261,22 @@ entries:
   - id: cow-read-type-widening
     feature: table-feature-type-widening
     operation: select-widened
-    dtype: int-to-bigint
+    dtype: smallint-to-int
     expected: partial
     upstream_claim: partial
     delta_min_version: "3.2"
     setup_sql: |
-      CREATE TABLE cov_r_tw (id INT) USING delta
+      CREATE TABLE cov_r_tw (id SMALLINT) USING delta
         TBLPROPERTIES ('delta.enableTypeWidening' = 'true');
       INSERT INTO cov_r_tw VALUES (1), (2);
-      ALTER TABLE cov_r_tw ALTER COLUMN id TYPE BIGINT;
-      INSERT INTO cov_r_tw VALUES (10000000000);
+      ALTER TABLE cov_r_tw ALTER COLUMN id TYPE INT;
+      INSERT INTO cov_r_tw VALUES (1000000);
     query_sql: |
       SELECT id FROM cov_r_tw WHERE id < 5;
     teardown_sql: |
       DROP TABLE cov_r_tw;
+    notes: "Delta 3.2's type-widening preview supports only byte->short->int; INT->BIGINT
+      needs Delta 3.3. smallint->int keeps this runnable on Delta 3.2.1."
 
   - id: cow-read-deletion-vector
     feature: mor-read
@@ -517,6 +522,8 @@ entries:
     dtype: bigint
     expected: native
     upstream_claim: yes
+    delta_min_version: "3.3"
+    spark_min_version: "4.0"
     config:
       "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
     setup_sql: |
@@ -525,6 +532,9 @@ entries:
       INSERT INTO cov_w_id (v) VALUES ('a'), ('b'), ('c');
     teardown_sql: |
       DROP TABLE cov_w_id;
+    notes: "GENERATED ALWAYS AS IDENTITY is Spark 4.0 SQL grammar; identity columns are
+      Delta 3.3+. On Delta 3.2.1 + Spark 3.5.x this entry is version-skipped (3.3 exposes
+      identity only via the DeltaTable Scala/Python builder API, not SQL)."
 
   - id: cow-write-cdf-partition
     feature: cdc
@@ -727,6 +737,7 @@ entries:
     expected: fallback
     upstream_claim: yes
     delta_min_version: "3.0"
+    spark_min_version: "3.4"
     config:
       "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
     setup_sql: |
@@ -896,6 +907,7 @@ entries:
     dtype: n/a
     expected: partial
     upstream_claim: not-tested
+    archived: true
     config:
       "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
     setup_sql: |
@@ -906,6 +918,8 @@ entries:
     teardown_sql: |
       DROP TABLE cov_m_clddd;
       DROP TABLE cov_m_clds;
+    notes: "Archived: DEEP CLONE is not in the OSS Delta SQL grammar (any version; the
+      DeltaSqlBase.g4 clone rule accepts SHALLOW only). Databricks-only syntax."
 
   - id: cow-maintenance-restore-version
     feature: cow-maintenance
@@ -971,13 +985,17 @@ entries:
     expected: unknown
     upstream_claim: not-tested
     setup_sql: |
-      CREATE TABLE cov_m_aad (id INT) USING delta;
+      CREATE TABLE cov_m_aad (id INT) USING delta
+        TBLPROPERTIES ('delta.feature.allowColumnDefaults' = 'supported');
       INSERT INTO cov_m_aad VALUES (1);
+      ALTER TABLE cov_m_aad ADD COLUMN d STRING;
     query_sql: |
-      ALTER TABLE cov_m_aad ADD COLUMN d STRING DEFAULT 'x';
+      ALTER TABLE cov_m_aad ALTER COLUMN d SET DEFAULT 'x';
     teardown_sql: |
       DROP TABLE cov_m_aad;
-    notes: "Tracks #11494 known wrong-result bug."
+    notes: "Tracks #11494 known wrong-result bug. Delta rejects ADD COLUMN with an inline
+      DEFAULT in every version; the supported path (Delta 3.1+, Spark 3.4+) is the
+      allowColumnDefaults feature plus ALTER COLUMN ... SET DEFAULT, split across setup/query."
 
   - id: cow-maintenance-alter-add-feature
     feature: cow-maintenance
@@ -1187,6 +1205,7 @@ entries:
     expected: fallback
     upstream_claim: partial
     delta_min_version: "3.0"
+    spark_min_version: "3.4"
     config:
       "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
     setup_sql: |
@@ -1319,10 +1338,12 @@ entries:
       INSERT INTO cov_morm_cs VALUES (1), (2);
       DELETE FROM cov_morm_cs WHERE id = 1;
     query_sql: |
-      CREATE TABLE cov_morm_cd DEEP CLONE cov_morm_cs;
+      CREATE TABLE cov_morm_cd SHALLOW CLONE cov_morm_cs;
     teardown_sql: |
       DROP TABLE cov_morm_cd;
       DROP TABLE cov_morm_cs;
+    notes: "SHALLOW clone: OSS Delta has no DEEP CLONE SQL. Exercises cloning a table whose
+      files carry deletion vectors."
 
 # ============================================================================
 # Table feature verification (round-trips)
@@ -1421,21 +1442,23 @@ entries:
   - id: table-feature-type-widening-roundtrip
     feature: table-feature-type-widening
     operation: insert-widen-select
-    dtype: int-to-bigint
+    dtype: smallint-to-int
     expected: partial
     upstream_claim: partial
     delta_min_version: "3.2"
     config:
       "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
     setup_sql: |
-      CREATE TABLE cov_tf_tw (id INT) USING delta
+      CREATE TABLE cov_tf_tw (id SMALLINT) USING delta
         TBLPROPERTIES ('delta.enableTypeWidening' = 'true');
       INSERT INTO cov_tf_tw VALUES (1), (2);
-      ALTER TABLE cov_tf_tw ALTER COLUMN id TYPE BIGINT;
+      ALTER TABLE cov_tf_tw ALTER COLUMN id TYPE INT;
     query_sql: |
       SELECT id FROM cov_tf_tw;
     teardown_sql: |
       DROP TABLE cov_tf_tw;
+    notes: "smallint->int is the widest change Delta 3.2's preview supports; INT->BIGINT
+      needs Delta 3.3."
 
   - id: table-feature-identity-allocation
     feature: table-feature-identity
@@ -1443,6 +1466,8 @@ entries:
     dtype: bigint
     expected: native
     upstream_claim: yes
+    delta_min_version: "3.3"
+    spark_min_version: "4.0"
     config:
       "spark.gluten.sql.columnar.backend.velox.delta.enableNativeWrite": "true"
     setup_sql: |
@@ -1452,6 +1477,8 @@ entries:
       SELECT id, v FROM cov_tf_idn ORDER BY id;
     teardown_sql: |
       DROP TABLE cov_tf_idn;
+    notes: "Identity SQL grammar is Spark 4.0+; identity columns are Delta 3.3+.
+      Version-skipped on Delta 3.2.1 + Spark 3.5.x."
 
   - id: table-feature-column-mapping-roundtrip
     feature: table-feature-column-mapping

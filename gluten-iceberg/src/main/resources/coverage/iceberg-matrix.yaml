@@ -949,6 +949,7 @@ entries:
     dtype: int
     expected: fallback
     upstream_claim: fallback
+    spark_min_version: "3.4"
     setup_sql: |
       CREATE TABLE cov_ib_nmbs_t (id INT, v STRING) USING iceberg;
       INSERT INTO cov_ib_nmbs_t VALUES (1, 'a'), (2, 'b'), (3, 'c');
@@ -1806,7 +1807,7 @@ entries:
       SELECT id, u FROM cov_ib_t_uu;
     teardown_sql: |
       DROP TABLE cov_ib_t_uu;
-    notes: "UUID type fallback per VeloxIceberg.md DataType row.";
+    notes: "UUID type fallback per VeloxIceberg.md DataType row."
 
   - id: iceberg-type-boolean
     feature: iceberg-types
@@ -2069,7 +2070,7 @@ entries:
       SELECT id FROM cov_ib_fmt_av;
     teardown_sql: |
       DROP TABLE cov_ib_fmt_av;
-    notes: "Avro format unsupported per VeloxIceberg.md.";
+    notes: "Avro format unsupported per VeloxIceberg.md."
 
   - id: iceberg-format-parquet-zstd
     feature: iceberg-format
@@ -2167,7 +2168,7 @@ entries:
       SELECT id, v, _row_id, _last_updated_sequence_number FROM cov_ib_rl;
     teardown_sql: |
       DROP TABLE cov_ib_rl;
-    notes: "V3 row lineage; metadata columns untested.";
+    notes: "V3 row lineage; metadata columns untested."
 
   - id: iceberg-feature-default-value
     feature: iceberg-types
